@@ -810,6 +810,7 @@ func (s *Session) onLogin(msgID string, timestamp time.Time, rec *auth.Rec, miss
 	params["token"], params["expires"], _ = store.GetLogicalAuthHandler("token").GenSecret(rec)
 
 	reply.Ctrl.Params = params
+	log.Printf("登录后的onLogin,reply = %+v\n", reply)
 	return reply
 }
 
