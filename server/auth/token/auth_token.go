@@ -112,7 +112,6 @@ func (ta *authenticator) Authenticate(token []byte) (*auth.Rec, []byte, error) {
 	if err != nil {
 		return nil, nil, types.ErrMalformed
 	}
-
 	hbuf := new(bytes.Buffer)
 	binary.Write(hbuf, binary.LittleEndian, &tl)
 
@@ -143,7 +142,6 @@ func (ta *authenticator) Authenticate(token []byte) (*auth.Rec, []byte, error) {
 	if _, disabled := disabledUserIDs.Load(types.Uid(tl.Uid)); disabled {
 		return nil, nil, types.ErrFailed
 	}
-
 	return &auth.Rec{
 		Uid:       types.Uid(tl.Uid),
 		AuthLevel: auth.Level(tl.AuthLevel),
