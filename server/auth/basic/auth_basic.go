@@ -5,6 +5,7 @@ package basic
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"strings"
 	"time"
 
@@ -50,7 +51,7 @@ func (a *authenticator) checkPasswordPolicy(password string) error {
 
 func parseSecret(bsecret []byte) (uname, password string, err error) {
 	secret := string(bsecret)
-
+	log.Printf("secret: %s", secret)
 	splitAt := strings.Index(secret, ":")
 	if splitAt < 0 {
 		err = types.ErrMalformed
@@ -216,7 +217,7 @@ func (a *authenticator) Authenticate(secret []byte) (*auth.Rec, []byte, error) {
 		return nil, nil, types.ErrExpired
 	}
 
-	err = bcrypt.CompareHashAndPassword([]byte(passhash), []byte(password))
+	err = bcrypt.CompareHashAndPassword(passhash, []byte(password))
 	if err != nil {
 		// Invalid password
 		return nil, nil, types.ErrFailed

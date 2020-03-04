@@ -62,7 +62,7 @@ func checkAPIKey(apikey string) (isValid, isRoot bool) {
 		return
 	}
 
-	isRoot = (data[apikeyVersion+apikeyAppID+apikeySequence] == 1)
+	isRoot = data[apikeyVersion+apikeyAppID+apikeySequence] == 1
 
 	isValid = true
 

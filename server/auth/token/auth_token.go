@@ -114,7 +114,6 @@ func (ta *authenticator) Authenticate(token []byte) (*auth.Rec, []byte, error) {
 	}
 	hbuf := new(bytes.Buffer)
 	binary.Write(hbuf, binary.LittleEndian, &tl)
-
 	// Check signature.
 	hasher := hmac.New(sha256.New, ta.hmacSalt)
 	hasher.Write(hbuf.Bytes())

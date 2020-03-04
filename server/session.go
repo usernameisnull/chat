@@ -244,6 +244,7 @@ func (s *Session) dispatchRaw(raw []byte) {
 
 	if len(raw) == 1 && raw[0] == 0x31 {
 		// 0x31 == '1'. This is a network probe message. Respond with a '0':
+		log.Printf("in: 0x31 received!")
 		s.queueOutBytes([]byte{0x30})
 		return
 	}
