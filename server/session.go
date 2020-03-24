@@ -386,7 +386,6 @@ func (s *Session) dispatch(msg *ClientComMessage) {
 	}
 
 	handler(msg)
-	fmt.Println("====2", msg.id)
 	// Notify 'me' topic that this session is currently active
 	if uaRefresh && msg.from != "" && s.userAgent != "" {
 		if sub := s.getSub(msg.from); sub != nil {
@@ -444,14 +443,14 @@ func (s *Session) subscribe(msg *ClientComMessage) {
 // Leave/Unsubscribe a topic
 func (s *Session) leave(msg *ClientComMessage) {
 	log.Printf("leave, msg.Leave = %+v, msg.id = %+v, msg.from = %v,msg.timestamp = %+v,msg.topic = %+v, msg.authLvl = %+v",
-		msg.Leave,msg.id,msg.from,msg.timestamp, msg.topic, msg.authLvl)
+		msg.Leave, msg.id, msg.from, msg.timestamp, msg.topic, msg.authLvl)
 	// Expand topic name
 	expanded, resp := s.expandTopicName(msg)
 	if resp != nil {
 		s.queueOut(resp)
 		return
 	}
-	log.Printf("leave, expanded = %+v, resp = %+v",expanded, resp)
+	log.Printf("leave, expanded = %+v, resp = %+v", expanded, resp)
 	if sub := s.getSub(expanded); sub != nil {
 		// Session is attached to the topic.
 		if (msg.topic == "me" || msg.topic == "fnd") && msg.Leave.Unsub {
@@ -816,7 +815,6 @@ func (s *Session) onLogin(msgID string, timestamp time.Time, rec *auth.Rec, miss
 	params["token"], params["expires"], _ = store.GetLogicalAuthHandler("token").GenSecret(rec)
 
 	reply.Ctrl.Params = params
-	log.Printf("登录后的onLogin,reply = %+v\n", reply)
 	return reply
 }
 

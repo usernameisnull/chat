@@ -123,7 +123,9 @@ func wsWrite(ws *websocket.Conn, mt int, msg interface{}) error {
 		bits = []byte{}
 	}
 	ws.SetWriteDeadline(time.Now().Add(writeWait))
-	log.Printf("out: mt = `%v`, `%s`", mt,string(bits))
+	if mt!=9{
+		log.Printf("out: mt = `%v`, `%s`", mt,string(bits))
+	}
 	return ws.WriteMessage(mt, bits)
 }
 
