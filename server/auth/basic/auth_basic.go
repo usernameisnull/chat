@@ -1,6 +1,5 @@
+// Package basic is an authenticator by login-password.
 package basic
-
-// Authentication by login-password.
 
 import (
 	"encoding/json"
@@ -64,7 +63,7 @@ func parseSecret(bsecret []byte) (uname, password string, err error) {
 }
 
 // Init initializes the basic authenticator.
-func (a *authenticator) Init(jsonconf, name string) error {
+func (a *authenticator) Init(jsonconf json.RawMessage, name string) error {
 	if name == "" {
 		return errors.New("auth_basic: authenticator name cannot be blank")
 	}
@@ -81,8 +80,8 @@ func (a *authenticator) Init(jsonconf, name string) error {
 	}
 
 	var config configType
-	if err := json.Unmarshal([]byte(jsonconf), &config); err != nil {
-		return errors.New("auth_basic: failed to parse config: " + err.Error() + "(" + jsonconf + ")")
+	if err := json.Unmarshal(jsonconf, &config); err != nil {
+		return errors.New("auth_basic: failed to parse config: " + err.Error() + "(" + string(jsonconf) + ")")
 	}
 	a.name = name
 	a.addToTags = config.AddToTags
@@ -231,7 +230,8 @@ func (a *authenticator) Authenticate(secret []byte) (*auth.Rec, []byte, error) {
 		Uid:       uid,
 		AuthLevel: authLvl,
 		Lifetime:  lifetime,
-		Features:  0}, nil, nil
+		Features:  0,
+		State:     types.StateUndefined}, nil, nil
 }
 
 // IsUnique checks login uniqueness.
@@ -273,6 +273,22 @@ func (a *authenticator) RestrictedTags() ([]string, error) {
 		tags = []string{a.name}
 	}
 	return tags, nil
+}
+
+// GetResetParams returns authenticator parameters passed to password reset handler.
+func (a *authenticator) GetResetParams(uid types.Uid) (map[string]interface{}, error) {
+	login, _, _, _, err := store.Users.GetAuthRecord(uid, a.name)
+	if err != nil {
+		return nil, err
+	}
+	// User does not have a record matching the authentication scheme.
+	if login == "" {
+		return nil, types.ErrNotFound
+	}
+
+	params := make(map[string]interface{})
+	params["login"] = login
+	return params, nil
 }
 
 func init() {

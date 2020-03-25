@@ -193,7 +193,7 @@ type configType struct {
 	// Can be overridden from the command line, see option --listen.
 	Listen string `json:"listen"`
 	// Base URL path where the streaming and large file API calls are served, default is '/'.
-	// Can be overriden from the command line, see option --api_path.
+	// Can be overridden from the command line, see option --api_path.
 	ApiPath string `json:"api_path"`
 	// Cache-Control value for static content.
 	CacheControl int `json:"cache_control"`
@@ -239,9 +239,9 @@ func main() {
 	// Absolute paths are left unchanged.
 	rootpath, _ := filepath.Split(executable)
 
-	log.Printf("Server v%s:%s:%s; db: '%s'; pid %d; %d process(es)",
+	log.Printf("Server v%s:%s:%s; pid %d; %d process(es)",
 		currentVersion, executable, buildstamp,
-		store.GetAdapterName(), os.Getpid(), runtime.GOMAXPROCS(runtime.NumCPU()))
+		os.Getpid(), runtime.GOMAXPROCS(runtime.NumCPU()))
 
 	var configfile = flag.String("config", "tinode.conf", "Path to config file.")
 	// Path to static content.
@@ -297,7 +297,7 @@ func main() {
 	}
 	statsInit(mux, evpath)
 	statsRegisterInt("Version")
-	statsSet("Version", int64(parseVersion(currentVersion)))
+	statsSet("Version", base10Version(parseVersion(currentVersion)))
 
 	// Initialize serving debug profiles (optional).
 	servePprof(mux, *pprofUrl)
@@ -332,6 +332,7 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to connect to DB: ", err)
 	}
+	log.Println("DB adapter", store.GetAdapterName())
 	defer func() {
 		store.Close()
 		log.Println("Closed database connection(s)")
@@ -355,7 +356,7 @@ func main() {
 		if authhdl := store.GetLogicalAuthHandler(name); authhdl == nil {
 			log.Fatalln("Unknown authenticator", name)
 		} else if jsconf := config.Auth[name]; jsconf != nil {
-			if err := authhdl.Init(string(jsconf), name); err != nil {
+			if err := authhdl.Init(jsconf, name); err != nil {
 				log.Fatalln("Failed to init auth scheme", name+":", err)
 			}
 			tags, err := authhdl.RestrictedTags()
