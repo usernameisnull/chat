@@ -272,6 +272,7 @@ func getAPIKey(req *http.Request) string {
 			apikey = c.Value
 		}
 	}
+	log.Println("====apikey = ", apikey)
 	return apikey
 }
 

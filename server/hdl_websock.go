@@ -39,7 +39,7 @@ func (sess *Session) readLoop() {
 	defer func() {
 		sess.closeWS()
 		sess.cleanUp(false)
-		log.Printf("readLoop, defer ,%s",sess.sid)
+		log.Printf("readLoop, defer ,%s", sess.sid)
 	}()
 
 	sess.ws.SetReadLimit(globals.maxMessageSize)
@@ -54,7 +54,7 @@ func (sess *Session) readLoop() {
 		// Read a ClientComMessage
 		_, raw, err := sess.ws.ReadMessage()
 		if err != nil {
-			log.Printf("readLoop, %s",err)
+			log.Printf("readLoop, %s", err)
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure,
 				websocket.CloseNormalClosure) {
 				log.Println("ws: readLoop", sess.sid, err)
@@ -123,8 +123,8 @@ func wsWrite(ws *websocket.Conn, mt int, msg interface{}) error {
 		bits = []byte{}
 	}
 	ws.SetWriteDeadline(time.Now().Add(writeWait))
-	if mt!=9{
-		log.Printf("out: mt = `%v`, `%s`", mt,string(bits))
+	if mt != 9 {
+		log.Printf("out: mt = `%v`, `%s`, 客户端 = `%v`", mt, string(bits), ws.RemoteAddr())
 	}
 	return ws.WriteMessage(mt, bits)
 }
