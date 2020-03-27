@@ -416,7 +416,7 @@ func (s *Session) subscribe(msg *ClientComMessage) {
 			return
 		}
 	}
-
+	log.Printf("get expanded: %s, `%+v`, `%+v`, `%+v`", expanded, msg.Sub.Id, msg.Sub.Topic, msg.Sub.Get.What)
 	// Session can subscribe to topic on behalf of a single user at a time.
 	if sub := s.getSub(expanded); sub != nil {
 		s.queueOut(InfoAlreadySubscribed(msg.id, msg.topic, msg.timestamp))
@@ -436,6 +436,7 @@ func (s *Session) subscribe(msg *ClientComMessage) {
 			s.addRemoteSub(expanded, &RemoteSubscription{node: remoteNodeName, originalTopic: originalTopic})
 		}
 	} else {
+		log.Println("====subscribe->else")
 		globals.hub.join <- &sessionJoin{
 			topic: expanded,
 			pkt:   msg,
@@ -499,7 +500,7 @@ func (s *Session) publish(msg *ClientComMessage) {
 		s.queueOut(resp)
 		return
 	}
-
+	log.Printf("publish, expanded: %s", expanded)
 	// Add "sender" header if the message is sent on behalf of another user.
 	if msg.from != s.uid.UserId() {
 		if msg.Pub.Head == nil {

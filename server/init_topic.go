@@ -111,6 +111,7 @@ func topicInit(t *Topic, sreg *sessionJoin, h *Hub) {
 
 // Initialize 'me' topic.
 func initTopicMe(t *Topic, sreg *sessionJoin) error {
+	log.Println("初始化topic `me`")
 	t.cat = types.TopicCatMe
 
 	user, err := store.Users.Get(sreg.sess.uid)

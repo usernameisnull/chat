@@ -162,7 +162,11 @@ func serveWebSocket(wrt http.ResponseWriter, req *http.Request) {
 		log.Println("ws: failed to Upgrade ", err)
 		return
 	}
-
+	compressLevel := 9
+	ws.EnableWriteCompression(true)
+	if err := ws.SetCompressionLevel(compressLevel); err != nil {
+		log.Printf("设置压缩级别为`%d`失败: %s", compressLevel, err)
+	}
 	sess, count := globals.sessionStore.NewSession(ws, "")
 
 	log.Println("ws: session started", sess.sid, count)

@@ -167,6 +167,7 @@ func (h *Hub) run() {
 			// Is the topic already loaded?
 			t := h.topicGet(sreg.topic)
 			if t == nil {
+				log.Println("创建新的topic")
 				// Topic does not exist or not loaded.
 				t = &Topic{name: sreg.topic,
 					xoriginal: sreg.pkt.topic,
