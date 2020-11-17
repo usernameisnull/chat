@@ -1,6 +1,6 @@
 # Tinode Instant Messaging Server
 
-<img src="docs/logo.svg" align="left" width=128 height=128> Instant messaging server. Backend in pure [Go](http://golang.org) (license [GPL 3.0](http://www.gnu.org/licenses/gpl-3.0.en.html)), client-side binding in Java, Javascript, and Swift, as well as [gRPC](https://grpc.io/) client support for C++, C#, Go, Java, Node, PHP, Python, Ruby, Objective-C, etc. (license [Apache 2.0](http://www.apache.org/licenses/LICENSE-2.0)). Wire transport is JSON over websocket (long polling is also available) for custom bindings, or [protobuf](https://developers.google.com/protocol-buffers/) with gRPC. Persistent storage [RethinkDB](http://rethinkdb.com/), MySQL and MongoDB (experimental). A third-party [DynamoDB adapter](https://github.com/riandyrn/chat/tree/master/server/db/dynamodb) also exists. Other databases can be supported by writing custom adapters.
+<img src="docs/logo.svg" align="left" width=128 height=128> Instant messaging server. Backend in pure [Go](http://golang.org) (license [GPL 3.0](http://www.gnu.org/licenses/gpl-3.0.en.html)), client-side binding in Java, Javascript, and Swift, as well as [gRPC](https://grpc.io/) client support for C++, C#, Go, Java, Node, PHP, Python, Ruby, Objective-C, etc. (license [Apache 2.0](http://www.apache.org/licenses/LICENSE-2.0)). Wire transport is JSON over websocket (long polling is also available) for custom bindings, or [protobuf](https://developers.google.com/protocol-buffers/) with gRPC. Persistent storage is any one of [RethinkDB](http://rethinkdb.com/), MySQL or MongoDB. A third-party unsupported [DynamoDB adapter](https://github.com/riandyrn/chat/tree/master/server/db/dynamodb) also exists. Other databases can be supported by writing custom adapters.
 
 Tinode is *not* XMPP/Jabber. It is *not* compatible with XMPP. It's meant as a replacement for XMPP. On the surface, it's a lot like open source WhatsApp or Telegram.
 
@@ -14,6 +14,9 @@ The promise of [XMPP](http://xmpp.org/) was to deliver federated instant messagi
 
 The goal of this project is to deliver on XMPP's original vision: create a modern open platform for federated instant messaging with an emphasis on mobile communication. A secondary goal is to create a decentralized IM platform that is much harder to track and block by the governments.
 
+## Installing and running
+
+See [general instructions](./INSTALL.md) or [docker-specific instructions](./docker/README.md).
 
 ## Getting support
 
@@ -24,20 +27,21 @@ The goal of this project is to deliver on XMPP's original vision: create a moder
 
 ## Public service
 
-A public Tinode service is now available. You can register and use it just like any other instant messenger. Keep in mind that demo accounts present in [sandbox](https://sandbox.tinode.co/) are not available in the public service. You must register an account using valid email in order to use the service.
+A [public Tinode service](https://web.tinode.co/) is now available. You can use it just like any other instant messenger. Keep in mind that demo accounts present in [sandbox](https://sandbox.tinode.co/) are not available in the public service. You must register an account using valid email in order to use the service.
 
 ### Web
 
-TinodeWeb, a single page web app, is available at https://web.tinode.co/ ([source](https://github.com/tinode/webapp/)). See screenshots below. Currently available in English, Simplified Chinese, Russian. More translations are welcome.
+TinodeWeb, a single page web app, is available at https://web.tinode.co/ ([source](https://github.com/tinode/webapp/)). See screenshots below. Currently available in English, Simplified Chinese, Korean, Russian, Spanish. More translations are welcome.
+
 
 ### Android
 
-[Tinode for Android](https://play.google.com/store/apps/details?id=co.tinode.tindroidx) a.k.a Tindroid is stable and functional ([source](https://github.com/tinode/tindroid)). See the screenshots below. A [debug APK](https://github.com/tinode/tindroid/releases/latest) is also provided for convenience. Currently available in English, Russian. More translations are welcome.
+[Tinode for Android](https://play.google.com/store/apps/details?id=co.tinode.tindroidx) a.k.a Tindroid is stable and functional ([source](https://github.com/tinode/tindroid)). See the screenshots below. A [debug APK](https://github.com/tinode/tindroid/releases/latest) is also provided for convenience. Currently available in English, Simplified Chinese, Korean, Russian, Spanish. More translations are welcome.
 
 
 ### iOS
 
-[Tinode for iOS](https://apps.apple.com/app/reference-to-tinodios-here/id123) a.k.a. Tinodios is stable and functional ([source](https://github.com/tinode/ios)). See the screenshots below. Currently available in English, Simplified Chinese. More translations are welcome.
+[Tinode for iOS](https://apps.apple.com/app/reference-to-tinodios-here/id123) a.k.a. Tinodios is stable and functional ([source](https://github.com/tinode/ios)). See the screenshots below. Currently available in English, Simplified Chinese, Spanish. More translations are welcome.
 
 
 ## Demo/Sandbox
@@ -46,7 +50,7 @@ A sandboxed demo service is available at https://sandbox.tinode.co/.
 
 Log in as one of `alice`, `bob`, `carol`, `dave`, `frank`. Password is `<login>123`, e.g. login for `alice` is `alice123`. You can discover other users by email or phone by prefixing them with `email:` or `tel:` respectively. Emails are `<login>@example.com`, e.g. `alice@example.com`, phones are `+17025550001` through `+17025550009`.
 
-If you register a new account you are asked for an email address to send validation code to. For demo purposes you may use `123456` as a universal validation code. The code you get in the email is also valid.
+When you register a new account you are asked for an email address to send validation code to. For demo purposes you may use `123456` as a universal validation code. The code you get in the email is also valid.
 
 ### Sandbox Notes
 
@@ -62,38 +66,47 @@ If you register a new account you are asked for an email address to send validat
 
 ### Supported
 
-* [Android](https://github.com/tinode/tindroid/), [iOS](https://github.com/tinode/ios), [web](https://github.com/tinode/webapp/), and [command line](tn-cli/) clients.
-* One-on-one messaging.
-* Group messaging with every member's access permissions managed individually. The maximum number of members is configurable (128 by default).
-* Topic access control with permissions for various actions.
-* Server-generated presence notifications for people, topics.
-* Support for custom authentication backends.
+* Multiple platforms:
+  * [Android](https://github.com/tinode/tindroid/)
+  * [iOS](https://github.com/tinode/ios)
+  * [Web](https://github.com/tinode/webapp/)
+  * Scriptable [command line](tn-cli/)
+* One-on-one and group messaging.
+* Channels with an unlimited number of read-only subscribers.
 * Sharded clustering with failover.
-* Persistent message store, paginated message history.
-* Javascript bindings with no external dependencies.
-* Java bindings (dependencies: [Jackson](https://github.com/FasterXML/jackson), [Java-Websocket](https://github.com/TooTallNate/Java-WebSocket)). Suitable for Android but with no Android SDK dependencies.
-* Websocket, long polling, and [gRPC](https://grpc.io/) over TCP transports.
+* Granular access control with permissions for various actions.
+* Server-generated presence notifications for people, group chats.
+* Support for custom authentication backends.
+* Bindings for various programming languages:
+  * Javascript with no external dependencies.
+  * Java with dependencies on [Jackson](https://github.com/FasterXML/jackson) and [Java-Websocket](https://github.com/TooTallNate/Java-WebSocket). Suitable for Android but with no Android SDK dependencies.
+  * Swift with dependency on [SwiftWebSocket](https://github.com/tidwall/SwiftWebSocket).
+  * C/C++, C#, Go, Python, PHP, Ruby and many other languages using [gRPC](https://grpc.io/docs/languages/).
+* Websocket, long polling, and [gRPC](https://grpc.io/) over TCP or Unix sockets.
 * JSON or [protobuf version 3](https://developers.google.com/protocol-buffers/) wire protocols.
-* [TLS](https://en.wikipedia.org/wiki/Transport_Layer_Security) with [Letsencrypt](https://letsencrypt.org/) or conventional certificates.
 * User search/discovery.
-* Rich formatting of messages, markdown-style: \*style\* &rarr; **style**.
-* Inline images and file attachments.
+* Rich formatting of messages markdown-style: \*style\* &rarr; **style**.
+* Inline images, file attachments.
 * Forms and templated responses suitable for chatbots.
 * Message status notifications: message delivery to server; received and read notifications; typing notifications.
-* Support for client-side data caching.
 * Ability to block unwanted communication server-side.
 * Anonymous users (important for use cases related to tech support over chat).
-* Push notifications using [FCM](https://firebase.google.com/docs/cloud-messaging/).
 * Storage and out of band transfer of large objects like video files using local file system or Amazon S3.
-* Plugins to extend functionality, for example to enable chatbots.
+* Plugins to extend functionality, for example, to enable chatbots.
 
 ### Planned
 
 * [Federation](https://en.wikipedia.org/wiki/Federation_(information_technology)).
 * End to end encryption with [OTR](https://en.wikipedia.org/wiki/Off-the-Record_Messaging) for one-on-one messaging and undecided method for group messaging.
-* Group messaging with an unlimited number (or hundreds of thousands) of members with bearer token access control.
+* Replying and forwarding messages.
+* Voice and video messages, location sharing.
+* Previews of attached videos, documents, links.
 * Hot standby.
 * Different levels of message persistence (from strict persistence to "store until delivered" to purely ephemeral messaging).
+
+### Translations
+
+All client software has support for internationalization. Translations are provided on all platforms for English, Simplified Chinese, Spanish. On all but iOS: Russian, Korean, German. More translations are welcome. Particularly interested in Arabic, Vietnamese, Persian, Indonesian, Portuguese, Hindi, Bengali.
 
 ## Third-Party Licenses
 
@@ -107,25 +120,27 @@ If you register a new account you are asked for an email address to send validat
 ### [Android](https://github.com/tinode/tindroid/)
 
 <p align="center">
-<img src="docs/android-contacts.png" alt="Android screenshot: list of chats" width=270 /> <img src="docs/android-chat.png" alt="Android screenshot: one conversation" width=270 />
+<img src="docs/android-contacts.png" alt="Android screenshot: list of chats" width=270 />
+<img src="docs/android-chat.png" alt="Android screenshot: one conversation" width=270 />
+<img src="docs/android-account.png" alt="Android screenshot: account settings" width=270 />
 </p>
 
 ### [iOS](https://github.com/tinode/ios)
 
 <p align="center">
-<img src="docs/ios-contacts.png" alt="iOS screenshot: list of chats" width=207 /> <img src="docs/ios-chat.png" alt="iOS screenshot: one conversation" width=207 /> <img src="docs/ios-account.png" alt="iOS screenshot: account settings" width="207" />
+<img src="docs/ios-contacts.png" alt="iOS screenshot: list of chats" width=207 /> <img src="docs/ios-chat.png" alt="iOS screenshot: one conversation" width=207 /> <img src="docs/ios-acc-personal.png" alt="iOS screenshot: account settings" width="207" />
 </p>
 
 ### [Desktop Web](https://github.com/tinode/webapp/)
 
 <p align="center">
-  <img src="docs/web-desktop-2.png" alt="Desktop web: full app" width=866 />
+  <img src="docs/web-desktop-2.png" alt="Desktop web: full app" width=810 />
 </p>
 
 ### [Mobile Web](https://github.com/tinode/webapp/)
 
 <p align="center">
-  <kbd><img src="docs/web-mob-contacts-1.png" alt="Mobile web: contacts" width=323 /></kbd> <kbd><img src="docs/web-mob-chat-1.png" alt="Mobile web: chat" width=323 /></kbd> <kbd><img src="docs/web-mob-info-1.png" alt="Mobile web: topic info" width=323 /></kbd> <kbd><img src="docs/web-mob-new-chat-1.png" alt="Mobile web: start new 1:1 chat" width=323 /></kbd>
+  <img src="docs/web-mob-contacts-1.png" alt="Mobile web: contacts" width=250 /> <img src="docs/web-mob-chat-1.png" alt="Mobile web: chat" width=250 /> <img src="docs/web-mob-info-1.png" alt="Mobile web: topic info" width=250 />
 </p>
 
 

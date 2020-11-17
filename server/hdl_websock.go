@@ -47,7 +47,6 @@ func (sess *Session) readLoop() {
 		sess.ws.SetReadDeadline(time.Now().Add(pongWait))
 		return nil
 	})
-	sess.remoteAddr = sess.ws.RemoteAddr().String()
 
 	for {
 		// Read a ClientComMessage
@@ -59,6 +58,7 @@ func (sess *Session) readLoop() {
 			}
 			return
 		}
+		statsInc("IncomingMessagesWebsockTotal", 1)
 		sess.dispatchRaw(raw)
 	}
 }
@@ -83,6 +83,7 @@ func (sess *Session) writeLoop() {
 				log.Println("ws: outbound queue limit exceeded", sess.sid)
 				return
 			}
+			statsInc("OutgoingMessagesWebsockTotal", 1)
 			if err := wsWrite(sess.ws, websocket.TextMessage, msg); err != nil {
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure,
 					websocket.CloseNormalClosure) {
@@ -90,6 +91,13 @@ func (sess *Session) writeLoop() {
 				}
 				return
 			}
+
+		case <-sess.bkgTimer.C:
+			if sess.background {
+				sess.background = false
+				sess.onBackgroundTimer()
+			}
+
 		case msg := <-sess.stop:
 			// Shutdown requested, don't care if the message is delivered
 			if msg != nil {
@@ -160,8 +168,14 @@ func serveWebSocket(wrt http.ResponseWriter, req *http.Request) {
 	}
 
 	sess, count := globals.sessionStore.NewSession(ws, "")
+	if globals.useXForwardedFor {
+		sess.remoteAddr = req.Header.Get("X-Forwarded-For")
+	}
+	if sess.remoteAddr == "" {
+		sess.remoteAddr = req.RemoteAddr
+	}
 
-	log.Println("ws: session started", sess.sid, count)
+	log.Println("ws: session started", sess.sid, sess.remoteAddr, count)
 
 	// Do work in goroutines to return from serveWebSocket() to release file pointers.
 	// Otherwise "too many open files" will happen.

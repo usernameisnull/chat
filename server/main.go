@@ -22,10 +22,10 @@ import (
 	"strings"
 	"time"
 
-	// For stripping comments from JSON config
-	jcr "github.com/DisposaBoy/JsonConfigReader"
-
 	gh "github.com/gorilla/handlers"
+
+	// For stripping comments from JSON config
+	jcr "github.com/tinode/jsonco"
 
 	// Authenticators
 	"github.com/tinode/chat/server/auth"
@@ -43,6 +43,7 @@ import (
 	"github.com/tinode/chat/server/push"
 	_ "github.com/tinode/chat/server/push/fcm"
 	_ "github.com/tinode/chat/server/push/stdout"
+	_ "github.com/tinode/chat/server/push/tnpg"
 
 	"github.com/tinode/chat/server/store"
 
@@ -64,8 +65,10 @@ const (
 
 	// idleSessionTimeout defines duration of being idle before terminating a session.
 	idleSessionTimeout = time.Second * 55
-	// idleTopicTimeout defines now long to keep topic alive after the last session detached.
-	idleTopicTimeout = time.Second * 5
+	// idleMasterTopicTimeout defines now long to keep master topic alive after the last session detached.
+	idleMasterTopicTimeout = time.Second * 4
+	// Same as above but shut down the proxy topic sooner. Otherwise master topic would be kept alive for too long.
+	idleProxyTopicTimeout = time.Second * 2
 
 	// defaultMaxMessageSize is the default maximum message size
 	defaultMaxMessageSize = 1 << 19 // 512K
@@ -96,6 +99,10 @@ const (
 
 	// Local path to static content
 	defaultStaticPath = "static"
+
+	// Default country code to fall back to if the "default_country_code" field
+	// isn't specified in the config.
+	defaultCountryCode = "US"
 )
 
 // Build version number defined by the compiler:
@@ -160,6 +167,12 @@ var globals struct {
 
 	// Maximum allowed upload size.
 	maxFileUploadSize int64
+
+	// Prioritise X-Forwarded-For header as the source of IP address of the client.
+	useXForwardedFor bool
+
+	// Country code to assign to sessions by default.
+	defaultCountryCode string
 }
 
 type validatorConfig struct {
@@ -193,7 +206,7 @@ type configType struct {
 	// Can be overridden from the command line, see option --listen.
 	Listen string `json:"listen"`
 	// Base URL path where the streaming and large file API calls are served, default is '/'.
-	// Can be overriden from the command line, see option --api_path.
+	// Can be overridden from the command line, see option --api_path.
 	ApiPath string `json:"api_path"`
 	// Cache-Control value for static content.
 	CacheControl int `json:"cache_control"`
@@ -220,6 +233,13 @@ type configType struct {
 	MaxTagCount int `json:"max_tag_count"`
 	// URL path for exposing runtime stats. Disabled if the path is blank.
 	ExpvarPath string `json:"expvar"`
+	// Take IP address of the client from HTTP header 'X-Forwarded-For'.
+	// Useful when tinode is behind a proxy. If missing, fallback to default RemoteAddr.
+	UseXForwardedFor bool `json:"use_x_forwarded_for"`
+	// 2-letter country code (ISO 3166-1 alpha-2) to assign to sessions by default
+	// when the country isn't specified by the client explicitly and
+	// it's impossible to infer it.
+	DefaultCountryCode string `json:"default_country_code"`
 
 	// Configs for subsystems
 	Cluster   json.RawMessage             `json:"cluster_config"`
@@ -239,9 +259,9 @@ func main() {
 	// Absolute paths are left unchanged.
 	rootpath, _ := filepath.Split(executable)
 
-	log.Printf("Server v%s:%s:%s; db: '%s'; pid %d; %d process(es)",
+	log.Printf("Server v%s:%s:%s; pid %d; %d process(es)",
 		currentVersion, executable, buildstamp,
-		store.GetAdapterName(), os.Getpid(), runtime.GOMAXPROCS(runtime.NumCPU()))
+		os.Getpid(), runtime.GOMAXPROCS(runtime.NumCPU()))
 
 	var configfile = flag.String("config", "tinode.conf", "Path to config file.")
 	// Path to static content.
@@ -263,17 +283,15 @@ func main() {
 	if file, err := os.Open(*configfile); err != nil {
 		log.Fatal("Failed to read config file: ", err)
 	} else {
-		if err = json.NewDecoder(jcr.New(file)).Decode(&config); err != nil {
-			// Need to reset file to start in order to convert byte offset to line number and character position.
-			// Ignore possible error: can't use it anyway.
-			file.Seek(0, 0)
+		jr := jcr.New(file)
+		if err = json.NewDecoder(jr).Decode(&config); err != nil {
 			switch jerr := err.(type) {
 			case *json.UnmarshalTypeError:
-				lnum, cnum, _ := offsetToLineAndChar(file, jerr.Offset)
+				lnum, cnum, _ := jr.LineAndChar(jerr.Offset)
 				log.Fatalf("Unmarshall error in config file in %s at %d:%d (offset %d bytes): %s",
 					jerr.Field, lnum, cnum, jerr.Offset, jerr.Error())
 			case *json.SyntaxError:
-				lnum, cnum, _ := offsetToLineAndChar(file, jerr.Offset)
+				lnum, cnum, _ := jr.LineAndChar(jerr.Offset)
 				log.Fatalf("Syntax error in config file at %d:%d (offset %d bytes): %s",
 					lnum, cnum, jerr.Offset, jerr.Error())
 			default:
@@ -297,7 +315,11 @@ func main() {
 	}
 	statsInit(mux, evpath)
 	statsRegisterInt("Version")
-	statsSet("Version", int64(parseVersion(currentVersion)))
+	decVersion := base10Version(parseVersion(buildstamp))
+	if decVersion <= 0 {
+		decVersion = base10Version(parseVersion(currentVersion))
+	}
+	statsSet("Version", decVersion)
 
 	// Initialize serving debug profiles (optional).
 	servePprof(mux, *pprofUrl)
@@ -332,6 +354,7 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to connect to DB: ", err)
 	}
+	log.Println("DB adapter", store.GetAdapterName())
 	defer func() {
 		store.Close()
 		log.Println("Closed database connection(s)")
@@ -355,14 +378,17 @@ func main() {
 		if authhdl := store.GetLogicalAuthHandler(name); authhdl == nil {
 			log.Fatalln("Unknown authenticator", name)
 		} else if jsconf := config.Auth[name]; jsconf != nil {
-			if err := authhdl.Init(string(jsconf), name); err != nil {
+			if err := authhdl.Init(jsconf, name); err != nil {
 				log.Fatalln("Failed to init auth scheme", name+":", err)
 			}
 			tags, err := authhdl.RestrictedTags()
 			if err != nil {
-				log.Fatalln("Failed get restricted tag namespaces", name+":", err)
+				log.Fatalln("Failed get restricted tag namespaces (prefixes)", name+":", err)
 			}
 			for _, tag := range tags {
+				if strings.Contains(tag, ":") {
+					log.Fatalln("tags restricted by auth handler should not contain character ':'", tag)
+				}
 				globals.immutableTagNS[tag] = true
 			}
 		}
@@ -374,7 +400,7 @@ func main() {
 		// The namespace can be restricted even if the validator is disabled.
 		if vconf.AddToTags {
 			if strings.Contains(name, ":") {
-				log.Fatal("acc_validation names should not contain character ':'")
+				log.Fatalln("acc_validation names should not contain character ':'", name)
 			}
 			globals.immutableTagNS[name] = true
 		}
@@ -423,7 +449,7 @@ func main() {
 	globals.maskedTagNS = make(map[string]bool, len(config.MaskedTagNamespaces))
 	for _, tag := range config.MaskedTagNamespaces {
 		if strings.Contains(tag, ":") {
-			log.Fatal("masked_tags namespaces should not contain character ':'")
+			log.Fatal("masked_tags namespaces should not contain character ':'", tag)
 		}
 		globals.maskedTagNS[tag] = true
 	}
@@ -457,6 +483,12 @@ func main() {
 	globals.maxTagCount = config.MaxTagCount
 	if globals.maxTagCount <= 0 {
 		globals.maxTagCount = defaultMaxTagCount
+	}
+
+	globals.useXForwardedFor = config.UseXForwardedFor
+	globals.defaultCountryCode = config.DefaultCountryCode
+	if globals.defaultCountryCode == "" {
+		globals.defaultCountryCode = defaultCountryCode
 	}
 
 	if config.Media != nil {

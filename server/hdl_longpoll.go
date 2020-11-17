@@ -26,17 +26,28 @@ func (sess *Session) writeOnce(wrt http.ResponseWriter, req *http.Request) {
 			if ok {
 				if len(sess.send) > sendQueueLimit {
 					log.Println("longPoll: outbound queue limit exceeded", sess.sid)
-				} else if err := lpWrite(wrt, msg); err != nil {
-					log.Println("longPoll: writeOnce failed", sess.sid, err)
+				} else {
+					statsInc("OutgoingMessagesLongpollTotal", 1)
+					if err := lpWrite(wrt, msg); err != nil {
+						log.Println("longPoll: writeOnce failed", sess.sid, err)
+					}
 				}
 			}
 			return
+
+		case <-sess.bkgTimer.C:
+			if sess.background {
+				sess.background = false
+				sess.onBackgroundTimer()
+			}
 
 		case msg := <-sess.stop:
 			// Request to close the session. Make it unavailable.
 			globals.sessionStore.Delete(sess)
 			// Don't care if lpWrite fails.
-			lpWrite(wrt, msg)
+			if msg != nil {
+				lpWrite(wrt, msg)
+			}
 			return
 
 		case topic := <-sess.detach:
@@ -75,6 +86,7 @@ func (sess *Session) readOnce(wrt http.ResponseWriter, req *http.Request) (int, 
 		// Locking-unlocking is needed because the client may issue multiple requests in parallel.
 		// Should not affect performance
 		sess.lock.Lock()
+		statsInc("IncomingMessagesLongpollTotal", 1)
 		sess.dispatchRaw(raw)
 		sess.lock.Unlock()
 		return 0, nil
@@ -91,7 +103,6 @@ func (sess *Session) readOnce(wrt http.ResponseWriter, req *http.Request) (int, 
 //   - if payload exists, process it and close
 //  - if sid is not empty but there is no session, report an error
 func serveLongPoll(wrt http.ResponseWriter, req *http.Request) {
-
 	now := time.Now().UTC().Round(time.Millisecond)
 
 	// Use the lowest common denominator - this is a legacy handler after all (otherwise would use application/json)
@@ -129,7 +140,9 @@ func serveLongPoll(wrt http.ResponseWriter, req *http.Request) {
 		// New session
 		var count int
 		sess, count = globals.sessionStore.NewSession(wrt, "")
-		log.Println("longPoll: session started", sess.sid, count)
+		sess.remoteAddr = lpRemoteAddr(req)
+		log.Println("longPoll: session started", sess.sid, sess.remoteAddr, count)
+
 		wrt.WriteHeader(http.StatusCreated)
 		pkt := NoErrCreated(req.FormValue("id"), "", now)
 		pkt.Ctrl.Params = map[string]string{
@@ -138,7 +151,6 @@ func serveLongPoll(wrt http.ResponseWriter, req *http.Request) {
 		enc.Encode(pkt)
 
 		return
-
 	}
 
 	// Existing session
@@ -150,8 +162,11 @@ func serveLongPoll(wrt http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// FIXME: this is a race condition. Lock session before.
-	sess.remoteAddr = req.RemoteAddr
+	addr := lpRemoteAddr(req)
+	if sess.remoteAddr != addr {
+		sess.remoteAddr = addr
+		log.Println("longPoll: remote address changed", sid, addr)
+	}
 
 	if req.ContentLength != 0 {
 		// Read payload and send it for processing.
@@ -169,4 +184,16 @@ func serveLongPoll(wrt http.ResponseWriter, req *http.Request) {
 	}
 
 	sess.writeOnce(wrt, req)
+}
+
+// Obtain IP address of the client.
+func lpRemoteAddr(req *http.Request) string {
+	var addr string
+	if globals.useXForwardedFor {
+		addr = req.Header.Get("X-Forwarded-For")
+	}
+	if addr != "" {
+		return addr
+	}
+	return req.RemoteAddr
 }

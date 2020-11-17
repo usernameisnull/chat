@@ -9,6 +9,14 @@ import (
 	t "github.com/tinode/chat/server/store/types"
 )
 
+// Push actions
+const (
+	// New message.
+	ActMsg = "msg"
+	// New subscription.
+	ActSub = "sub"
+)
+
 // Recipient is a user targeted by the push.
 type Recipient struct {
 	// Count of user's connections that were live when the packet was dispatched from the server
@@ -21,26 +29,51 @@ type Recipient struct {
 
 // Receipt is the push payload with a list of recipients.
 type Receipt struct {
-	// List of recipients, including those who did not receive the message
+	// List of individual recipients, including those who did not receive the message.
 	To map[t.Uid]Recipient `json:"to"`
-	// Actual content to be delivered to the client
+	// Push topic for group notifications.
+	Channel string `json:"channel"`
+	// Actual content to be delivered to the client.
 	Payload Payload `json:"payload"`
+}
+
+// ChannelReq is a request to subscribe/unsubscribe device IDs to channel (FCM topic).
+type ChannelReq struct {
+	// Uid is the id of the user making request
+	Uid t.Uid `json:"-"`
+	// Channel to subscribe to or unsubscribe from.
+	Channel string `json:"channel"`
+	// Unsub is set to true to unsubscribe devices, otherwise subscribe them.
+	Unsub bool `json:"unsub"`
 }
 
 // Payload is content of the push.
 type Payload struct {
-	// Topic which received the message.
+	// Action type of the push: new message (msg), new subscription (sub), etc.
+	What string `json:"what"`
+	// If this is a silent push: perform action but do not show a notification to the user.
+	Silent bool `json:"silent"`
+	// Topic which was affected by the action.
 	Topic string `json:"topic"`
+	// Timestamp of the action.
+	Timestamp time.Time `json:"ts"`
+
+	// {data} notification.
+
 	// Message sender 'usrXXX'
 	From string `json:"from"`
-	// Timestapm of the message.
-	Timestamp time.Time `json:"ts"`
 	// Sequential ID of the message.
 	SeqId int `json:"seq"`
 	// MIME-Type of the message content, text/x-drafty or text/plain
 	ContentType string `json:"mime"`
 	// Actual Data.Content of the message, if requested
 	Content interface{} `json:"content,omitempty"`
+
+	// New subscription notification
+
+	// Access mode when notifying of new subscriptions.
+	ModeWant  t.AccessMode `json:"want,omitempty"`
+	ModeGiven t.AccessMode `json:"given,omitempty"`
 }
 
 // Handler is an interface which must be implemented by handlers.
@@ -48,12 +81,15 @@ type Handler interface {
 	// Init initializes the handler.
 	Init(jsonconf string) error
 
-	// IsReady сheckы if the handler is initialized.
+	// IsReady сhecks if the handler is initialized.
 	IsReady() bool
 
 	// Push returns a channel that the server will use to send messages to.
 	// The message will be dropped if the channel blocks.
 	Push() chan<- *Receipt
+
+	// Subscribe/unsubscribe device from FCM topic (channel).
+	Channel() chan<- *ChannelReq
 
 	// Stop terminates the handler's worker and stops sending pushes.
 	Stop()
@@ -100,7 +136,7 @@ func Init(jsconfig string) error {
 	return nil
 }
 
-// Push a single message
+// Push a single message to devices.
 func Push(msg *Receipt) {
 	if handlers == nil {
 		return
@@ -114,6 +150,25 @@ func Push(msg *Receipt) {
 		// Push without delay or skip
 		select {
 		case hnd.Push() <- msg:
+		default:
+		}
+	}
+}
+
+// ChannelSub handles a channel (FCM topic) subscription/unsubscription request.
+func ChannelSub(msg *ChannelReq) {
+	if handlers == nil {
+		return
+	}
+
+	for _, hnd := range handlers {
+		if !hnd.IsReady() {
+			continue
+		}
+
+		// Send without delay or skip.
+		select {
+		case hnd.Channel() <- msg:
 		default:
 		}
 	}

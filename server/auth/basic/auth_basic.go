@@ -1,10 +1,10 @@
+// Package basic is an authenticator by login-password.
 package basic
-
-// Authentication by login-password.
 
 import (
 	"encoding/json"
 	"errors"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,11 +17,15 @@ import (
 
 // Define default constraints on login and password
 const (
-	defaultMinLoginLength = 1
+	defaultMinLoginLength = 2
 	defaultMaxLoginLength = 32
 
 	defaultMinPasswordLength = 3
 )
+
+// Token suitable as a login: starts with a Unicode letter (class L) and contains Unicode letters (L),
+// numbers (N) and underscore.
+var loginPattern = regexp.MustCompile(`^\pL[_\pL\pN]+$`)
 
 // authenticator is the type to map authentication methods to.
 type authenticator struct {
@@ -33,7 +37,8 @@ type authenticator struct {
 }
 
 func (a *authenticator) checkLoginPolicy(uname string) error {
-	if len([]rune(uname)) < a.minLoginLength || len([]rune(uname)) > defaultMaxLoginLength {
+	rlogin := []rune(uname)
+	if len(rlogin) < a.minLoginLength || len(rlogin) > defaultMaxLoginLength || !loginPattern.MatchString(uname) {
 		return types.ErrPolicy
 	}
 
@@ -63,7 +68,7 @@ func parseSecret(bsecret []byte) (uname, password string, err error) {
 }
 
 // Init initializes the basic authenticator.
-func (a *authenticator) Init(jsonconf, name string) error {
+func (a *authenticator) Init(jsonconf json.RawMessage, name string) error {
 	if name == "" {
 		return errors.New("auth_basic: authenticator name cannot be blank")
 	}
@@ -80,8 +85,8 @@ func (a *authenticator) Init(jsonconf, name string) error {
 	}
 
 	var config configType
-	if err := json.Unmarshal([]byte(jsonconf), &config); err != nil {
-		return errors.New("auth_basic: failed to parse config: " + err.Error() + "(" + jsonconf + ")")
+	if err := json.Unmarshal(jsonconf, &config); err != nil {
+		return errors.New("auth_basic: failed to parse config: " + err.Error() + "(" + string(jsonconf) + ")")
 	}
 	a.name = name
 	a.addToTags = config.AddToTags
@@ -162,6 +167,11 @@ func (a *authenticator) UpdateRecord(rec *auth.Rec, secret []byte) (*auth.Rec, e
 		uname = login
 	} else if err = a.checkLoginPolicy(uname); err != nil {
 		return nil, err
+	} else if uid, _, _, _, err := store.Users.GetAuthUniqueRecord(a.name, uname); err != nil {
+		return nil, err
+	} else if !uid.IsZero() {
+		// The (new) user name already exists. Report an error.
+		return nil, types.ErrDuplicate
 	}
 
 	if err = a.checkPasswordPolicy(password); err != nil {
@@ -216,7 +226,7 @@ func (a *authenticator) Authenticate(secret []byte) (*auth.Rec, []byte, error) {
 		return nil, nil, types.ErrExpired
 	}
 
-	err = bcrypt.CompareHashAndPassword([]byte(passhash), []byte(password))
+	err = bcrypt.CompareHashAndPassword(passhash, []byte(password))
 	if err != nil {
 		// Invalid password
 		return nil, nil, types.ErrFailed
@@ -230,7 +240,21 @@ func (a *authenticator) Authenticate(secret []byte) (*auth.Rec, []byte, error) {
 		Uid:       uid,
 		AuthLevel: authLvl,
 		Lifetime:  lifetime,
-		Features:  0}, nil, nil
+		Features:  0,
+		State:     types.StateUndefined}, nil, nil
+}
+
+// AsTag convert search token into a prefixed tag, if possible.
+func (a *authenticator) AsTag(token string) string {
+	if !a.addToTags {
+		return ""
+	}
+
+	if err := a.checkLoginPolicy(token); err != nil {
+		return ""
+	}
+
+	return a.name + ":" + token
 }
 
 // IsUnique checks login uniqueness.
@@ -265,13 +289,29 @@ func (a *authenticator) DelRecords(uid types.Uid) error {
 	return store.Users.DelAuthRecords(uid, a.name)
 }
 
-// RestrictedTags returns tag namespaces restricted in this config.
+// RestrictedTags returns tag namespaces (prefixes) restricted by this adapter.
 func (a *authenticator) RestrictedTags() ([]string, error) {
-	var tags []string
+	var prefix []string
 	if a.addToTags {
-		tags = []string{a.name}
+		prefix = []string{a.name}
 	}
-	return tags, nil
+	return prefix, nil
+}
+
+// GetResetParams returns authenticator parameters passed to password reset handler.
+func (a *authenticator) GetResetParams(uid types.Uid) (map[string]interface{}, error) {
+	login, _, _, _, err := store.Users.GetAuthRecord(uid, a.name)
+	if err != nil {
+		return nil, err
+	}
+	// User does not have a record matching the authentication scheme.
+	if login == "" {
+		return nil, types.ErrNotFound
+	}
+
+	params := make(map[string]interface{})
+	params["login"] = login
+	return params, nil
 }
 
 func init() {

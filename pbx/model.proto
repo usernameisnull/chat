@@ -82,8 +82,8 @@ message ClientCred {
 	string value = 2;
 	// Verification response
 	string response = 3;
-	// Request parameters, such as preferences.
-	bytes params = 4;
+	// Request parameters, such as preferences or country code.
+	map<string, bytes> params = 4;
 }
 
 // SetDesc: C2S in set.what == "desc" and sub.init message
@@ -143,6 +143,7 @@ message ClientHi {
 	string device_id = 4;
 	string lang = 5;
 	string platform = 6;
+	bool background = 7;
 }
 
 // User creation message {acc}
@@ -164,6 +165,8 @@ message ClientAcc {
 	repeated ClientCred cred = 8;
 	// Authentication token used for resetting a password.
 	bytes token = 9;
+	// Account state: normal ("ok"), suspended
+	string state = 10;
 }
 
 // Login {login} message
@@ -187,8 +190,6 @@ message ClientSub {
 
 	// mirrors {get}
 	GetQuery get_query = 4;
-
-	bool background = 5;
 }
 
 // Unsubscribe {leave} request message
@@ -304,6 +305,8 @@ message TopicDesc {
 	int32 del_id = 9;
 	bytes public = 10;
 	bytes private = 11;
+	string state = 12;
+	int64 state_at = 13;
 }
 
 // MsgTopicSub: topic subscription details, sent in Meta message

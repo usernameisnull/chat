@@ -1,6 +1,8 @@
+// Package tel is an incomplete implementation of SMS or voice credential validator.
 package tel
 
 import (
+	"github.com/nyaruka/phonenumbers"
 	"github.com/tinode/chat/server/store"
 	t "github.com/tinode/chat/server/store/types"
 )
@@ -24,10 +26,23 @@ func (v *validator) Init(jsonconf string) error {
 }
 
 // PreCheck validates the credential and parameters without sending an SMS or making the call.
-func (*validator) PreCheck(cred string, params interface{}) error {
-	// TODO: Check phone format. Format phone for E.164
-	// TODO: Check phone uniqueness
-	return nil
+// If credential is valid it's formatted and prefixed with a tag namespace.
+func (*validator) PreCheck(cred string, params map[string]interface{}) (string, error) {
+	countryCode, ok := params["countryCode"].(string)
+	if !ok {
+		countryCode = "US"
+	}
+
+	// Libphonenumber is broken by design: Parse will try to extract the number from any text.
+	if phonenumbers.VALID_PHONE_NUMBER_PATTERN.MatchString(cred) {
+		if num, err := phonenumbers.Parse(cred, countryCode); err == nil {
+			// It's a phone number. Not checking the length because phone numbers cannot be that long.
+			if phonenumbers.IsValidNumber(num) {
+				return validatorName + ":" + phonenumbers.Format(num, phonenumbers.E164), nil
+			}
+		}
+	}
+	return "", t.ErrMalformed
 }
 
 // Request sends a request for confirmation to the user: makes a record in DB  and nothing else.
@@ -37,7 +52,7 @@ func (*validator) Request(user t.Uid, cred, lang, resp string, tmpToken []byte) 
 }
 
 // ResetSecret sends a message with instructions for resetting an authentication secret.
-func (*validator) ResetSecret(cred, scheme, lang string, tmpToken []byte) error {
+func (*validator) ResetSecret(cred, scheme, lang string, tmpToken []byte, params map[string]interface{}) error {
 	// TODO: send SMS with rest instructions.
 	return nil
 }
