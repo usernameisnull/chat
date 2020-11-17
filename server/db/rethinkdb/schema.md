@@ -9,11 +9,13 @@ Fields:
 * `Id` user id, primary key
 * `CreatedAt` timestamp when the user was created
 * `UpdatedAt` timestamp when user metadata was updated
-* `DeletedAt` currently unused
+* `State` account state: normal (ok), suspended, soft-deleted
+* `StateAt` timestamp when the state was last updated or NULL
 * `Access` user's default access level for peer-to-peer topics
  * `Auth`, `Anon` default permissions for authenticated and anonymous users
 * `Public` application-defined data
-* `State` currently unused
+* `State` state of the user: normal, disabled, deleted
+* `StateAt` timestamp when the state was last updated or NULL
 * `LastSeen` timestamp when the user was last online
 * `UserAgent` client User-Agent used when last online
 * `Tags` unique strings for user discovery
@@ -37,7 +39,8 @@ Sample:
     "Auth": 47
   } ,
   "CreatedAt": Mon Jul 24 2017 11:16:38 GMT+00:00 ,
-  "DeletedAt": null ,
+  "State": 0,
+  "StateAt": null ,
   "Devices": null ,
   "Id": "7yUCHniegrM" ,
   "LastSeen": Mon Jan 01 1 00:00:00 GMT+00:00 ,
@@ -91,15 +94,16 @@ Fields:
  * `Id` name of the topic, primary key
  * `CreatedAt` topic creation time
  * `UpdatedAt` timestamp of the last change to topic metadata
- * `DeletedAt` currently unused
+ * `State` topic state: normal (ok), suspended, soft-deleted
+ * `StateAt` timestamp when the state was last updated or NULL
  * `Access` stores topic's default access permissions
   * `Auth`, `Anon` permissions for authenticated and anonymous users respectively
  * `Owner` ID of the user who owns the topic
  * `Public` application-defined data
- * `State` currently unused
+ * `State` state of the topic: normal, disabled, deleted
  * `SeqId` sequential ID of the last message
  * `DelId` topic-sequential ID of the deletion operation
- * `UseBt` currently unused
+ * `UseBt` indicator that channel functionality is enabled in the topic
 
 Indexes:
 * `Id` primary key
@@ -114,7 +118,8 @@ Sample:
  } ,
  "DelId": 0,
  "CreatedAt": Thu Oct 15 2015 04:06:51 GMT+00:00 ,
- "DeletedAt": null ,
+ "State": 0 ,
+ "StateAt": null ,
  "LastMessageAt": Sat Oct 17 2015 13:51:56 GMT+00:00 ,
  "Id":  "p2pavVGHLCBbKrvJQIeeJ6Csw" ,
  "Owner": "v2JyG4OLSoA" ,

@@ -12,6 +12,7 @@ package main
 import (
 	"container/list"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -23,15 +24,8 @@ import (
 	"github.com/tinode/chat/server/auth"
 	"github.com/tinode/chat/server/store"
 	"github.com/tinode/chat/server/store/types"
-)
 
-// Wire transport
-const (
-	NONE = iota
-	WEBSOCK
-	LPOLL
-	GRPC
-	CLUSTER
+	"golang.org/x/text/language"
 )
 
 // Wait time before abandoning the outbound send operation.
@@ -42,41 +36,62 @@ const sendTimeout = time.Millisecond * 7
 // Maximum number of queued messages before session is considered stale and dropped.
 const sendQueueLimit = 128
 
+// Time given to a background session to terminate to avoid tiggering presence notifications.
+// If session terminates (or unsubscribes from topic) in this time frame notifications are not sent at all.
+const deferredNotificationsTimeout = time.Second * 5
+
 var minSupportedVersionValue = parseVersion(minSupportedVersion)
 
-// Holds metadata on the subscription/topic hosted on a remote node.
-type RemoteSubscription struct {
-	// Hosting node.
-	node string
-	// Topic name, as specified by the client.
-	originalTopic string
-}
+// SessionProto is the type of the wire transport.
+type SessionProto int
+
+// Constants defining individual types of wire transports.
+const (
+	// NONE is undefined/not set.
+	NONE SessionProto = iota
+	// WEBSOCK represents websocket connection.
+	WEBSOCK
+	// LPOLL represents a long polling connection.
+	LPOLL
+	// GRPC is a gRPC connection
+	GRPC
+	// PROXY is temporary session used as a proxy at master node.
+	PROXY
+	// MULTIPLEX is a multiplexing session reprsenting a connection from proxy topic to master.
+	MULTIPLEX
+)
 
 // Session represents a single WS connection or a long polling session. A user may have multiple
 // sessions.
 type Session struct {
-	// protocol - NONE (unset), WEBSOCK, LPOLL, CLUSTER, GRPC
-	proto int
+	// protocol - NONE (unset), WEBSOCK, LPOLL, GRPC, PROXY, MULTIPLEX
+	proto SessionProto
 
-	// Websocket. Set only for websocket sessions
+	// Session ID
+	sid string
+
+	// Websocket. Set only for websocket sessions.
 	ws *websocket.Conn
 
-	// Pointer to session's record in sessionStore. Set only for Long Poll sessions
+	// Pointer to session's record in sessionStore. Set only for Long Poll sessions.
 	lpTracker *list.Element
 
-	// gRPC handle. Set only for gRPC clients
+	// gRPC handle. Set only for gRPC clients.
 	grpcnode pbx.Node_MessageLoopServer
 
-	// Reference to the cluster node where the session has originated. Set only for cluster RPC sessions
+	// Reference to the cluster node where the session has originated. Set only for cluster RPC sessions.
 	clnode *ClusterNode
 
-	// IP address of the client. For long polling this is the IP of the last poll
+	// Reference to multiplexing session. Set only for proxy sessions.
+	multi *Session
+
+	// IP address of the client. For long polling this is the IP of the last poll.
 	remoteAddr string
 
-	// User agent, a string provived by an authenticated client in {login} packet
+	// User agent, a string provived by an authenticated client in {login} packet.
 	userAgent string
 
-	// Protocol version of the client: ((major & 0xff) << 8) | (minor & 0xff)
+	// Protocol version of the client: ((major & 0xff) << 8) | (minor & 0xff).
 	ver int
 
 	// Device ID of the client
@@ -85,11 +100,14 @@ type Session struct {
 	platf string
 	// Human language of the client
 	lang string
+	// Country code of the client
+	countryCode string
 
-	// ID of the current user or 0
+	// ID of the current user. Could be zero if session is not authenticated
+	// or for multiplexing sessions.
 	uid types.Uid
 
-	// Authentication level - NONE (unset), ANON, AUTH, ROOT
+	// Authentication level - NONE (unset), ANON, AUTH, ROOT.
 	authLvl auth.Level
 
 	// Time when the long polling session was last refreshed
@@ -97,6 +115,21 @@ type Session struct {
 
 	// Time when the session received any packer from client
 	lastAction time.Time
+
+	// Background session: subscription presence notifications and online status are delayed.
+	background bool
+	// Timer which triggers after some seconds to mark background session as foreground.
+	bkgTimer *time.Timer
+
+	// Number of subscribe/unsubscribe requests in flight.
+	inflightReqs *sync.WaitGroup
+	// Synchronizes access to session store in cluster mode:
+	// subscribe/unsubscribe replies are asynchronous.
+	sessionStoreLock sync.Mutex
+	// Indicates that the session is terminating.
+	// After this flag's been flipped to true, there must not be any more writes
+	// into the session's send channel.
+	terminating bool
 
 	// Outbound mesages, buffered.
 	// The content must be serialized in format suitable for the session.
@@ -106,7 +139,8 @@ type Session struct {
 	// Content in the same format as for 'send'
 	stop chan interface{}
 
-	// detach - channel for detaching session from topic, buffered
+	// detach - channel for detaching session from topic, buffered.
+	// Content is topic name to detach from.
 	detach chan string
 
 	// Map of topic subscriptions, indexed by topic name.
@@ -116,16 +150,13 @@ type Session struct {
 	// subs concurrently.
 	subsLock sync.RWMutex
 
-	// Map of remote topic subscriptions, indexed by topic name.
-	remoteSubs map[string]*RemoteSubscription
-	// Synchronizes access to remoteSubs.
-	remoteSubsLock sync.RWMutex
-
-	// Session ID
-	sid string
-
 	// Needed for long polling and grpc.
 	lock sync.Mutex
+
+	// Field used only in cluster mode by topic master node.
+
+	// Type of proxy to master request being handled.
+	proxyReq ProxyReqType
 }
 
 // Subscription is a mapper of sessions to topics.
@@ -140,18 +171,30 @@ type Subscription struct {
 	// Channel to send {meta} requests, copy of Topic.meta
 	meta chan<- *metaReq
 
-	// Channel to ping topic with session's user agent
-	uaChange chan<- string
+	// Channel to ping topic with session's updates
+	supd chan<- *sessionUpdate
 }
 
 func (s *Session) addSub(topic string, sub *Subscription) {
+	if s.multi != nil {
+		s.multi.addSub(topic, sub)
+		return
+	}
 	s.subsLock.Lock()
-	defer s.subsLock.Unlock()
 
-	s.subs[topic] = sub
+	// Sessions that serve as an interface between proxy topics and their masters (proxy sessions)
+	// may have only one subscription, that is, to its master topic.
+	// Normal sessions may be subscribed to multiple topics.
+
+	if !s.isMultiplex() || s.countSub() == 0 {
+		s.subs[topic] = sub
+	}
+	s.subsLock.Unlock()
 }
 
 func (s *Session) getSub(topic string) *Subscription {
+	// Don't check s.multi here. Let it panic if called for proxy session.
+
 	s.subsLock.RLock()
 	defer s.subsLock.RUnlock()
 
@@ -159,56 +202,93 @@ func (s *Session) getSub(topic string) *Subscription {
 }
 
 func (s *Session) delSub(topic string) {
+	if s.multi != nil {
+		s.multi.delSub(topic)
+		return
+	}
 	s.subsLock.Lock()
-	defer s.subsLock.Unlock()
-
 	delete(s.subs, topic)
+	s.subsLock.Unlock()
+}
+
+func (s *Session) countSub() int {
+	if s.multi != nil {
+		return s.multi.countSub()
+	}
+	return len(s.subs)
 }
 
 // Inform topics that the session is being terminated.
-// sessionLeave.userId is not set because the whole session is being dropped.
+// No need to check for s.multi because it's not called for PROXY sessions.
 func (s *Session) unsubAll() {
 	s.subsLock.RLock()
 	defer s.subsLock.RUnlock()
 
 	for _, sub := range s.subs {
 		// sub.done is the same as topic.unreg
+		// Leave message is not set because the whole session is being dropped.
 		sub.done <- &sessionLeave{sess: s}
 	}
 }
 
-func (s *Session) getRemoteSub(topic string) *RemoteSubscription {
-	s.remoteSubsLock.RLock()
-	defer s.remoteSubsLock.RUnlock()
-
-	return s.remoteSubs[topic]
+// Represents a proxied (remote) session.
+type remoteSession struct {
+	// User id of the proxied session.
+	uid types.Uid
+	// Whether the proxied session is background.
+	isBackground bool
 }
 
-func (s *Session) addRemoteSub(topic string, remoteSub *RemoteSubscription) {
-	s.remoteSubsLock.Lock()
-	defer s.remoteSubsLock.Unlock()
-
-	s.remoteSubs[topic] = remoteSub
+// Indicates whether this session is a local interface for a remote proxy topic.
+// It multiplexes multiple sessions.
+func (s *Session) isMultiplex() bool {
+	return s.proto == MULTIPLEX
 }
 
-func (s *Session) delRemoteSub(topic string) {
-	s.remoteSubsLock.Lock()
-	defer s.remoteSubsLock.Unlock()
-
-	delete(s.remoteSubs, topic)
+// Indicates whether this session is a short-lived proxy for a remote session.
+func (s *Session) isProxy() bool {
+	return s.proto == PROXY
 }
 
-// queueOut attempts to send a ServerComMessage to a session; if the send buffer is full,
+// Cluster session: either a proxy or a multiplexing session.
+func (s *Session) isCluster() bool {
+	return s.isProxy() || s.isMultiplex()
+}
+
+// queueOut attempts to send a ServerComMessage to a session write loop; if the send buffer is full,
 // timeout is `sendTimeout`.
 func (s *Session) queueOut(msg *ServerComMessage) bool {
-	if s == nil {
+	if s.terminating {
 		return true
 	}
+	if s.multi != nil {
+		// In case of a cluster we need to pass a copy of the actual session.
+		msg.sess = s
+		return s.multi.queueOut(msg)
+	}
 
+	// Record latency only on {ctrl} messages and end-user sessions.
+	if msg.Ctrl != nil && msg.Id != "" {
+		if !msg.Ctrl.Timestamp.IsZero() && !s.isCluster() {
+			duration := time.Since(msg.Ctrl.Timestamp).Milliseconds()
+			statsAddHistSample("RequestLatency", float64(duration))
+		}
+		if 200 <= msg.Ctrl.Code && msg.Ctrl.Code < 600 {
+			statsInc(fmt.Sprintf("CtrlCodesTotal%dxx", msg.Ctrl.Code/100), 1)
+		} else {
+			log.Println("Invalid response code: ", msg.Ctrl.Code)
+		}
+	}
+
+	dataSize, data := s.serialize(msg)
+	if dataSize >= 0 {
+		statsAddHistSample("OutgoingMessageSize", float64(dataSize))
+	}
 	select {
-	case s.send <- s.serialize(msg):
-	case <-time.After(sendTimeout):
-		log.Println("s.queueOut: timeout", s.sid)
+	case s.send <- data:
+	default:
+		// Never block here since it may also block the topic's run() goroutine.
+		log.Println("s.queueOut: session's send queue full", s.sid)
 		return false
 	}
 	return true
@@ -217,30 +297,69 @@ func (s *Session) queueOut(msg *ServerComMessage) bool {
 // queueOutBytes attempts to send a ServerComMessage already serialized to []byte.
 // If the send buffer is full, timeout is `sendTimeout`.
 func (s *Session) queueOutBytes(data []byte) bool {
-	if s == nil {
+	if s == nil || s.terminating {
 		return true
 	}
 
 	select {
 	case s.send <- data:
-	case <-time.After(sendTimeout):
-		log.Println("s.queueOutBytes: timeout", s.sid)
+	default:
+		log.Println("s.queueOutBytes: session's send queue full", s.sid)
 		return false
 	}
 	return true
 }
 
-func (s *Session) cleanUp(expired bool) {
-	if !expired {
-		globals.sessionStore.Delete(s)
+func (s *Session) detachSession(fromTopic string) {
+	if !s.terminating {
+		s.detach <- fromTopic
 	}
-	globals.cluster.sessionGone(s)
+}
+
+func (s *Session) stopSession(data interface{}) {
+	s.stop <- data
+}
+
+func (sess *Session) purgeChannels() {
+	for len(sess.send) > 0 {
+		<-sess.send
+	}
+	for len(sess.stop) > 0 {
+		<-sess.stop
+	}
+	for len(sess.detach) > 0 {
+		<-sess.detach
+	}
+}
+
+// cleanUp is called when the session is terminated to perform resource cleanup.
+func (s *Session) cleanUp(expired bool) {
+	s.terminating = true
+	s.purgeChannels()
+	s.inflightReqs.Wait()
+	if !expired {
+		s.sessionStoreLock.Lock()
+		globals.sessionStore.Delete(s)
+		s.sessionStoreLock.Unlock()
+	}
+
+	s.background = false
+	s.bkgTimer.Stop()
 	s.unsubAll()
+	// Stop the write loop.
+	s.stopSession(nil)
 }
 
 // Message received, convert bytes to ClientComMessage and dispatch
 func (s *Session) dispatchRaw(raw []byte) {
+	now := types.TimeNow()
 	var msg ClientComMessage
+
+	if s.terminating {
+		log.Println("s.dispatch: message received on a terminating session", s.sid)
+		s.queueOut(ErrLocked("", "", now))
+		return
+	}
 
 	if len(raw) == 1 && raw[0] == 0x31 {
 		// 0x31 == '1'. This is a network probe message. Respond with a '0':
@@ -254,12 +373,12 @@ func (s *Session) dispatchRaw(raw []byte) {
 		toLog = raw[:512]
 		truncated = "<...>"
 	}
-	log.Printf("in: '%s%s' ip='%s' sid='%s' uid='%s'", toLog, truncated, s.remoteAddr, s.sid, s.uid)
+	log.Printf("in: '%s%s' sid='%s' uid='%s'", toLog, truncated, s.sid, s.uid)
 
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		// Malformed message
 		log.Println("s.dispatch", err, s.sid)
-		s.queueOut(ErrMalformed("", "", time.Now().UTC().Round(time.Millisecond)))
+		s.queueOut(ErrMalformed("", "", now))
 		return
 	}
 
@@ -268,15 +387,19 @@ func (s *Session) dispatchRaw(raw []byte) {
 
 func (s *Session) dispatch(msg *ClientComMessage) {
 	s.lastAction = types.TimeNow()
-	msg.timestamp = s.lastAction
+	msg.Timestamp = s.lastAction
 
-	if msg.from == "" {
-		msg.from = s.uid.UserId()
-		msg.authLvl = int(s.authLvl)
+	if msg.AsUser == "" {
+		msg.AsUser = s.uid.UserId()
+		msg.AuthLvl = int(s.authLvl)
 	} else if s.authLvl != auth.LevelRoot {
 		// Only root user can set non-default msg.from && msg.authLvl values.
-		s.queueOut(ErrPermissionDenied("", "", msg.timestamp))
+		s.queueOut(ErrPermissionDenied("", "", msg.Timestamp))
 		log.Println("s.dispatch: non-root asigned msg.from", s.sid)
+		return
+	} else if fromUid := types.ParseUserId(msg.AsUser); fromUid.IsZero() {
+		s.queueOut(ErrMalformed("", "", msg.Timestamp))
+		log.Println("s.dispatch: malformed msg.from: ", msg.AsUser, s.sid)
 		return
 	}
 
@@ -298,7 +421,7 @@ func (s *Session) dispatch(msg *ClientComMessage) {
 		return func(m *ClientComMessage) {
 			if s.ver == 0 {
 				log.Println("s.dispatch: {hi} is missing", s.sid)
-				s.queueOut(ErrCommandOutOfSequence(m.id, m.topic, m.timestamp))
+				s.queueOut(ErrCommandOutOfSequence(m.Id, m.Original, msg.Timestamp))
 				return
 			}
 			handler(m)
@@ -308,9 +431,9 @@ func (s *Session) dispatch(msg *ClientComMessage) {
 	// Check if user is logged in
 	checkUser := func(m *ClientComMessage, handler func(*ClientComMessage)) func(*ClientComMessage) {
 		return func(m *ClientComMessage) {
-			if msg.from == "" {
+			if msg.AsUser == "" {
 				log.Println("s.dispatch: authentication required", s.sid)
-				s.queueOut(ErrAuthRequired(m.id, m.topic, msg.timestamp))
+				s.queueOut(ErrAuthRequiredReply(m, m.Timestamp))
 				return
 			}
 			handler(m)
@@ -320,58 +443,58 @@ func (s *Session) dispatch(msg *ClientComMessage) {
 	switch {
 	case msg.Pub != nil:
 		handler = checkVers(msg, checkUser(msg, s.publish))
-		msg.id = msg.Pub.Id
-		msg.topic = msg.Pub.Topic
+		msg.Id = msg.Pub.Id
+		msg.Original = msg.Pub.Topic
 		uaRefresh = true
 
 	case msg.Sub != nil:
 		handler = checkVers(msg, checkUser(msg, s.subscribe))
-		msg.id = msg.Sub.Id
-		msg.topic = msg.Sub.Topic
+		msg.Id = msg.Sub.Id
+		msg.Original = msg.Sub.Topic
 		uaRefresh = true
 
 	case msg.Leave != nil:
 		handler = checkVers(msg, checkUser(msg, s.leave))
-		msg.id = msg.Leave.Id
-		msg.topic = msg.Leave.Topic
+		msg.Id = msg.Leave.Id
+		msg.Original = msg.Leave.Topic
 
 	case msg.Hi != nil:
 		handler = s.hello
-		msg.id = msg.Hi.Id
+		msg.Id = msg.Hi.Id
 
 	case msg.Login != nil:
 		handler = checkVers(msg, s.login)
-		msg.id = msg.Login.Id
+		msg.Id = msg.Login.Id
 
 	case msg.Get != nil:
 		handler = checkVers(msg, checkUser(msg, s.get))
-		msg.id = msg.Get.Id
-		msg.topic = msg.Get.Topic
+		msg.Id = msg.Get.Id
+		msg.Original = msg.Get.Topic
 		uaRefresh = true
 
 	case msg.Set != nil:
 		handler = checkVers(msg, checkUser(msg, s.set))
-		msg.id = msg.Set.Id
-		msg.topic = msg.Set.Topic
+		msg.Id = msg.Set.Id
+		msg.Original = msg.Set.Topic
 		uaRefresh = true
 
 	case msg.Del != nil:
 		handler = checkVers(msg, checkUser(msg, s.del))
-		msg.id = msg.Del.Id
-		msg.topic = msg.Del.Topic
+		msg.Id = msg.Del.Id
+		msg.Original = msg.Del.Topic
 
 	case msg.Acc != nil:
 		handler = checkVers(msg, s.acc)
-		msg.id = msg.Acc.Id
+		msg.Id = msg.Acc.Id
 
 	case msg.Note != nil:
 		handler = s.note
-		msg.topic = msg.Note.Topic
+		msg.Original = msg.Note.Topic
 		uaRefresh = true
 
 	default:
 		// Unknown message
-		s.queueOut(ErrMalformed("", "", msg.timestamp))
+		s.queueOut(ErrMalformed("", "", msg.Timestamp))
 		log.Println("s.dispatch: unknown message", s.sid)
 		return
 	}
@@ -379,33 +502,30 @@ func (s *Session) dispatch(msg *ClientComMessage) {
 	if globals.cluster.isPartitioned() {
 		// The cluster is partitioned due to network or other failure and this node is a part of the smaller partition.
 		// In order to avoid data inconsistency across the cluster we must reject all requests.
-		s.queueOut(ErrClusterUnreachable(msg.id, msg.topic, msg.timestamp))
+		s.queueOut(ErrClusterUnreachable(msg.Id, msg.Original, msg.Timestamp))
 		return
 	}
 
 	handler(msg)
 
-	// Notify 'me' topic that this session is currently active
-	if uaRefresh && msg.from != "" && s.userAgent != "" {
-		if sub := s.getSub(msg.from); sub != nil {
+	// Notify 'me' topic that this session is currently active.
+	if uaRefresh && msg.AsUser != "" && s.userAgent != "" {
+		if sub := s.getSub(msg.AsUser); sub != nil {
 			// The chan is buffered. If the buffer is exhaused, the session will wait for 'me' to become available
-			sub.uaChange <- s.userAgent
+			sub.supd <- &sessionUpdate{userAgent: s.userAgent}
 		}
 	}
 }
 
-// Request to subscribe to a topic
+// Request to subscribe to a topic.
 func (s *Session) subscribe(msg *ClientComMessage) {
-	var expanded string
-	isNewTopic := false
-	if strings.HasPrefix(msg.topic, "new") {
-		// Request to create a new named topic
-		expanded = genTopicName()
-		isNewTopic = true
-		// msg.topic = expanded
+	if strings.HasPrefix(msg.Original, "new") || strings.HasPrefix(msg.Original, "nch") {
+		// Request to create a new group/channel topic.
+		// If we are in a cluster, make sure the new topic belongs to the current node.
+		msg.RcptTo = globals.cluster.genLocalTopicName()
 	} else {
 		var resp *ServerComMessage
-		expanded, resp = s.expandTopicName(msg)
+		msg.RcptTo, resp = s.expandTopicName(msg)
 		if resp != nil {
 			s.queueOut(resp)
 			return
@@ -413,28 +533,20 @@ func (s *Session) subscribe(msg *ClientComMessage) {
 	}
 
 	// Session can subscribe to topic on behalf of a single user at a time.
-	if sub := s.getSub(expanded); sub != nil {
-		s.queueOut(InfoAlreadySubscribed(msg.id, msg.topic, msg.timestamp))
-	} else if remoteNodeName := globals.cluster.nodeNameForTopicIfRemote(expanded); remoteNodeName != "" {
-		// The topic is handled by a remote node. Forward message to it.
-		if err := globals.cluster.routeToTopic(msg, expanded, s); err != nil {
-			log.Println("s.subscribe:", err, s.sid)
-			s.queueOut(ErrClusterUnreachable(msg.id, msg.topic, msg.timestamp))
-		} else {
-			var originalTopic string
-			if isNewTopic {
-				// New topics are "grp". It's okay to use expaneded.
-				originalTopic = expanded
-			} else {
-				originalTopic = msg.topic
-			}
-			s.addRemoteSub(expanded, &RemoteSubscription{node: remoteNodeName, originalTopic: originalTopic})
-		}
+	if sub := s.getSub(msg.RcptTo); sub != nil {
+		s.queueOut(InfoAlreadySubscribed(msg.Id, msg.Original, msg.Timestamp))
 	} else {
-		globals.hub.join <- &sessionJoin{
-			topic: expanded,
-			pkt:   msg,
-			sess:  s}
+		s.inflightReqs.Add(1)
+		select {
+		case globals.hub.join <- &sessionJoin{
+			pkt:  msg,
+			sess: s}:
+		default:
+			// Reply with a 500 to the user.
+			s.queueOut(ErrUnknownReply(msg, msg.Timestamp))
+			s.inflightReqs.Done()
+			log.Println("s.subscribe: join queue full, topic ", msg.RcptTo, s.sid)
+		}
 		// Hub will send Ctrl success/failure packets back to session
 	}
 }
@@ -442,57 +554,49 @@ func (s *Session) subscribe(msg *ClientComMessage) {
 // Leave/Unsubscribe a topic
 func (s *Session) leave(msg *ClientComMessage) {
 	// Expand topic name
-	expanded, resp := s.expandTopicName(msg)
+	var resp *ServerComMessage
+	msg.RcptTo, resp = s.expandTopicName(msg)
 	if resp != nil {
 		s.queueOut(resp)
 		return
 	}
 
-	if sub := s.getSub(expanded); sub != nil {
+	if sub := s.getSub(msg.RcptTo); sub != nil {
 		// Session is attached to the topic.
-		if (msg.topic == "me" || msg.topic == "fnd") && msg.Leave.Unsub {
+		if (msg.Original == "me" || msg.Original == "fnd") && msg.Leave.Unsub {
 			// User should not unsubscribe from 'me' or 'find'. Just leaving is fine.
-			s.queueOut(ErrPermissionDenied(msg.id, msg.topic, msg.timestamp))
+			s.queueOut(ErrPermissionDeniedReply(msg, msg.Timestamp))
 		} else {
 			// Unlink from topic, topic will send a reply.
-			s.delSub(expanded)
+			s.delSub(msg.RcptTo)
+			s.inflightReqs.Add(1)
 			sub.done <- &sessionLeave{
-				userId: types.ParseUserId(msg.from),
-				topic:  msg.topic,
-				sess:   s,
-				unsub:  msg.Leave.Unsub,
-				id:     msg.id}
-		}
-	} else if globals.cluster.isRemoteTopic(expanded) {
-		// The topic is handled by a remote node. Forward message to it.
-		if err := globals.cluster.routeToTopic(msg, expanded, s); err != nil {
-			log.Println("s.leave:", err, s.sid)
-			s.queueOut(ErrClusterUnreachable(msg.id, msg.topic, msg.timestamp))
-		} else {
-			s.delRemoteSub(expanded)
+				pkt:  msg,
+				sess: s}
 		}
 	} else if !msg.Leave.Unsub {
 		// Session is not attached to the topic, wants to leave - fine, no change
-		s.queueOut(InfoNotJoined(msg.id, msg.topic, msg.timestamp))
+		s.queueOut(InfoNotJoined(msg.Id, msg.Original, msg.Timestamp))
 	} else {
 		// Session wants to unsubscribe from the topic it did not join
 		// FIXME(gene): allow topic to unsubscribe without joining first; send to hub to unsub
 		log.Println("s.leave:", "must attach first", s.sid)
-		s.queueOut(ErrAttachFirst(msg.id, msg.topic, msg.timestamp))
+		s.queueOut(ErrAttachFirst(msg, msg.Timestamp))
 	}
 }
 
 // Broadcast a message to all topic subscribers
 func (s *Session) publish(msg *ClientComMessage) {
 	// TODO(gene): Check for repeated messages with the same ID
-	expanded, resp := s.expandTopicName(msg)
+	var resp *ServerComMessage
+	msg.RcptTo, resp = s.expandTopicName(msg)
 	if resp != nil {
 		s.queueOut(resp)
 		return
 	}
 
 	// Add "sender" header if the message is sent on behalf of another user.
-	if msg.from != s.uid.UserId() {
+	if msg.AsUser != s.uid.UserId() {
 		if msg.Pub.Head == nil {
 			msg.Pub.Head = make(map[string]interface{})
 		}
@@ -506,36 +610,29 @@ func (s *Session) publish(msg *ClientComMessage) {
 	}
 
 	data := &ServerComMessage{Data: &MsgServerData{
-		Topic:     msg.topic,
-		From:      msg.from,
-		Timestamp: msg.timestamp,
+		Topic:     msg.Original,
+		From:      msg.AsUser,
+		Timestamp: msg.Timestamp,
 		Head:      msg.Pub.Head,
 		Content:   msg.Pub.Content},
-		// Unroutable values.
-		rcptto:    expanded,
-		sess:      s,
-		id:        msg.id,
-		timestamp: msg.timestamp,
-		from:      msg.from}
+		// Internal-only values.
+		Id:        msg.Id,
+		RcptTo:    msg.RcptTo,
+		AsUser:    msg.AsUser,
+		Timestamp: msg.Timestamp,
+		sess:      s}
 	if msg.Pub.NoEcho {
-		data.skipSid = s.sid
+		data.SkipSid = s.sid
 	}
-
-	if sub := s.getSub(expanded); sub != nil {
+	if sub := s.getSub(msg.RcptTo); sub != nil {
 		// This is a post to a subscribed topic. The message is sent to the topic only
 		sub.broadcast <- data
-	} else if globals.cluster.isRemoteTopic(expanded) {
-		// The topic is handled by a remote node. Forward message to it.
-		if err := globals.cluster.routeToTopic(msg, expanded, s); err != nil {
-			log.Println("s.publish:", err, s.sid)
-			s.queueOut(ErrClusterUnreachable(msg.id, msg.topic, msg.timestamp))
-		}
-	} else if expanded == "sys" {
+	} else if msg.RcptTo == "sys" {
 		// Publishing to "sys" topic requires no subsription.
 		globals.hub.route <- data
 	} else {
 		// Publish request received without attaching to topic first.
-		s.queueOut(ErrAttachFirst(msg.id, msg.topic, msg.timestamp))
+		s.queueOut(ErrAttachFirst(msg, msg.Timestamp))
 		log.Println("s.publish:", "must attach first", s.sid)
 	}
 }
@@ -549,13 +646,13 @@ func (s *Session) hello(msg *ClientComMessage) {
 		s.ver = parseVersion(msg.Hi.Version)
 		if s.ver == 0 {
 			log.Println("s.hello:", "failed to parse version", s.sid)
-			s.queueOut(ErrMalformed(msg.id, "", msg.timestamp))
+			s.queueOut(ErrMalformed(msg.Id, "", msg.Timestamp))
 			return
 		}
 		// Check version compatibility
 		if versionCompare(s.ver, minSupportedVersionValue) < 0 {
 			s.ver = 0
-			s.queueOut(ErrVersionNotSupported(msg.id, msg.timestamp))
+			s.queueOut(ErrVersionNotSupported(msg.Id, msg.Timestamp))
 			log.Println("s.hello:", "unsupported version", s.sid)
 			return
 		}
@@ -565,6 +662,8 @@ func (s *Session) hello(msg *ClientComMessage) {
 			"build":              store.GetAdapterName() + ":" + buildstamp,
 			"maxMessageSize":     globals.maxMessageSize,
 			"maxSubscriberCount": globals.maxSubscriberCount,
+			"minTagLength":       minTagLength,
+			"maxTagLength":       maxTagLength,
 			"maxTagCount":        globals.maxTagCount,
 			"maxFileUploadSize":  globals.maxFileUploadSize,
 		}
@@ -575,6 +674,10 @@ func (s *Session) hello(msg *ClientComMessage) {
 		s.platf = msg.Hi.Platform
 		if s.platf == "" {
 			s.platf = platformFromUA(msg.Hi.UserAgent)
+		}
+		// This is a background session. Start a timer.
+		if msg.Hi.Background {
+			s.bkgTimer.Reset(deferredNotificationsTimeout)
 		}
 	} else if msg.Hi.Version == "" || parseVersion(msg.Hi.Version) == s.ver {
 		// Save changed device ID+Lang or delete earlier specified device ID.
@@ -589,20 +692,20 @@ func (s *Session) hello(msg *ClientComMessage) {
 				err = store.Devices.Update(s.uid, s.deviceID, &types.DeviceDef{
 					DeviceId: msg.Hi.DeviceID,
 					Platform: s.platf,
-					LastSeen: msg.timestamp,
+					LastSeen: msg.Timestamp,
 					Lang:     msg.Hi.Lang,
 				})
 			}
 
 			if err != nil {
 				log.Println("s.hello:", "device ID", err, s.sid)
-				s.queueOut(ErrUnknown(msg.id, "", msg.timestamp))
+				s.queueOut(ErrUnknown(msg.Id, "", msg.Timestamp))
 				return
 			}
 		}
 	} else {
 		// Version cannot be changed mid-session.
-		s.queueOut(ErrCommandOutOfSequence(msg.id, "", msg.timestamp))
+		s.queueOut(ErrCommandOutOfSequence(msg.Id, "", msg.Timestamp))
 		log.Println("s.hello:", "version cannot be changed", s.sid)
 		return
 	}
@@ -612,6 +715,20 @@ func (s *Session) hello(msg *ClientComMessage) {
 	}
 	s.deviceID = msg.Hi.DeviceID
 	s.lang = msg.Hi.Lang
+	// Try to deduce the country from the locale.
+	if tag, err := language.Parse(s.lang); err == nil {
+		if region, conf := tag.Region(); region.IsCountry() && conf >= language.High {
+			s.countryCode = region.String()
+		}
+	}
+	if s.countryCode == "" {
+		if len(s.lang) > 2 {
+			// Logging strings longer than 2 b/c language.Parse(XX) always succeeds
+			// returning confidence Low.
+			log.Println("s.hello:", "could not parse locale ", s.lang)
+		}
+		s.countryCode = globals.defaultCountryCode
+	}
 
 	var httpStatus int
 	var httpStatusText string
@@ -626,7 +743,7 @@ func (s *Session) hello(msg *ClientComMessage) {
 		httpStatusText = "created"
 	}
 
-	ctrl := &MsgServerCtrl{Id: msg.id, Code: httpStatus, Text: httpStatusText, Timestamp: msg.timestamp}
+	ctrl := &MsgServerCtrl{Id: msg.Id, Code: httpStatus, Text: httpStatusText, Timestamp: msg.Timestamp}
 	if len(params) > 0 {
 		ctrl.Params = params
 	}
@@ -640,7 +757,7 @@ func (s *Session) acc(msg *ClientComMessage) {
 	var rec *auth.Rec
 	if msg.Acc.Token != nil {
 		if !s.uid.IsZero() {
-			s.queueOut(ErrAlreadyAuthenticated(msg.Acc.Id, "", msg.timestamp))
+			s.queueOut(ErrAlreadyAuthenticated(msg.Acc.Id, "", msg.Timestamp))
 			log.Println("s.acc: got token while already authenticated", s.sid)
 			return
 		}
@@ -648,7 +765,7 @@ func (s *Session) acc(msg *ClientComMessage) {
 		var err error
 		rec, _, err = store.GetLogicalAuthHandler("token").Authenticate(msg.Acc.Token)
 		if err != nil {
-			s.queueOut(decodeStoreError(err, msg.Acc.Id, "", msg.timestamp,
+			s.queueOut(decodeStoreError(err, msg.Acc.Id, "", msg.Timestamp,
 				map[string]interface{}{"what": "auth"}))
 			log.Println("s.acc: invalid token", err, s.sid)
 			return
@@ -670,9 +787,9 @@ func (s *Session) login(msg *ClientComMessage) {
 
 	if msg.Login.Scheme == "reset" {
 		if err := s.authSecretReset(msg.Login.Secret); err != nil {
-			s.queueOut(decodeStoreError(err, msg.id, "", msg.timestamp, nil))
+			s.queueOut(decodeStoreError(err, msg.Id, "", msg.Timestamp, nil))
 		} else {
-			s.queueOut(InfoAuthReset(msg.id, msg.timestamp))
+			s.queueOut(InfoAuthReset(msg.Id, msg.Timestamp))
 		}
 		return
 	}
@@ -680,26 +797,45 @@ func (s *Session) login(msg *ClientComMessage) {
 	if !s.uid.IsZero() {
 		// TODO: change error to notice InfoNoChange and return current user ID & auth level
 		// params := map[string]interface{}{"user": s.uid.UserId(), "authlvl": s.authLevel.String()}
-		s.queueOut(ErrAlreadyAuthenticated(msg.id, "", msg.timestamp))
+		s.queueOut(ErrAlreadyAuthenticated(msg.Id, "", msg.Timestamp))
 		return
 	}
 
 	handler := store.GetLogicalAuthHandler(msg.Login.Scheme)
 	if handler == nil {
 		log.Println("s.login: unknown authentication scheme", msg.Login.Scheme, s.sid)
-		s.queueOut(ErrAuthUnknownScheme(msg.id, "", msg.timestamp))
+		s.queueOut(ErrAuthUnknownScheme(msg.Id, "", msg.Timestamp))
 		return
 	}
 
 	rec, challenge, err := handler.Authenticate(msg.Login.Secret)
 	if err != nil {
-		s.queueOut(decodeStoreError(err, msg.id, "", msg.timestamp, nil))
+		resp := decodeStoreError(err, msg.Id, "", msg.Timestamp, nil)
+		if resp.Ctrl.Code >= 500 {
+			// Log internal errors
+			log.Println("s.login: internal", err, s.sid)
+		}
+		s.queueOut(resp)
+		return
+	}
+
+	// If authenticator did not check user state, it returns state "undef". If so, check user state here.
+	if rec.State == types.StateUndefined {
+		rec.State, err = userGetState(rec.Uid)
+	}
+	if err == nil && rec.State != types.StateOK {
+		err = types.ErrPermissionDenied
+	}
+
+	if err != nil {
+		log.Println("s.login: user state check failed", rec.Uid, err, s.sid)
+		s.queueOut(decodeStoreError(err, msg.Id, "", msg.Timestamp, nil))
 		return
 	}
 
 	if challenge != nil {
 		// Multi-stage authentication. Issue challenge to the client.
-		s.queueOut(InfoChallenge(msg.id, msg.timestamp, challenge))
+		s.queueOut(InfoChallenge(msg.Id, msg.Timestamp, challenge))
 		return
 	}
 
@@ -714,9 +850,9 @@ func (s *Session) login(msg *ClientComMessage) {
 	}
 	if err != nil {
 		log.Println("s.login: failed to validate credentials:", err, s.sid)
-		s.queueOut(decodeStoreError(err, msg.id, "", msg.timestamp, nil))
+		s.queueOut(decodeStoreError(err, msg.Id, "", msg.Timestamp, nil))
 	} else {
-		s.queueOut(s.onLogin(msg.id, msg.timestamp, rec, missing))
+		s.queueOut(s.onLogin(msg.Id, msg.Timestamp, rec, missing))
 	}
 }
 
@@ -732,7 +868,8 @@ func (s *Session) authSecretReset(params []byte) error {
 
 	// Technically we don't need to check it here, but we are going to mail the 'authName' string to the user.
 	// We have to make sure it does not contain any exploits. This is the simplest check.
-	if hdl := store.GetLogicalAuthHandler(authScheme); hdl == nil {
+	hdl := store.GetLogicalAuthHandler(authScheme)
+	if hdl == nil {
 		return types.ErrUnsupported
 	}
 	validator := store.GetValidator(credMethod)
@@ -747,6 +884,11 @@ func (s *Session) authSecretReset(params []byte) error {
 		return types.ErrNotFound
 	}
 
+	resetParams, err := hdl.GetResetParams(uid)
+	if err != nil {
+		return err
+	}
+
 	token, _, err := store.GetLogicalAuthHandler("token").GenSecret(&auth.Rec{
 		Uid:       uid,
 		AuthLevel: auth.LevelAuth,
@@ -757,7 +899,7 @@ func (s *Session) authSecretReset(params []byte) error {
 		return err
 	}
 
-	return validator.ResetSecret(credValue, authScheme, s.lang, token)
+	return validator.ResetSecret(credValue, authScheme, s.lang, token, resetParams)
 }
 
 // onLogin performs steps after successful authentication.
@@ -816,88 +958,79 @@ func (s *Session) onLogin(msgID string, timestamp time.Time, rec *auth.Rec, miss
 
 func (s *Session) get(msg *ClientComMessage) {
 	// Expand topic name.
-	expanded, resp := s.expandTopicName(msg)
+	var resp *ServerComMessage
+	msg.RcptTo, resp = s.expandTopicName(msg)
 	if resp != nil {
 		s.queueOut(resp)
 		return
 	}
 
-	sub := s.getSub(expanded)
-	meta := &metaReq{
-		topic: expanded,
-		pkt:   msg,
-		sess:  s,
-		what:  parseMsgClientMeta(msg.Get.What)}
+	msg.MetaWhat = parseMsgClientMeta(msg.Get.What)
 
-	if meta.what == 0 {
-		s.queueOut(ErrMalformed(msg.id, msg.topic, msg.timestamp))
+	sub := s.getSub(msg.RcptTo)
+	meta := &metaReq{
+		pkt:  msg,
+		sess: s}
+
+	if meta.pkt.MetaWhat == 0 {
+		s.queueOut(ErrMalformedReply(msg, msg.Timestamp))
 		log.Println("s.get: invalid Get message action", msg.Get.What)
 	} else if sub != nil {
 		sub.meta <- meta
-	} else if globals.cluster.isRemoteTopic(expanded) {
-		// The topic is handled by a remote node. Forward message to it.
-		if err := globals.cluster.routeToTopic(msg, expanded, s); err != nil {
-			s.queueOut(ErrClusterUnreachable(msg.id, msg.topic, msg.timestamp))
-		}
-	} else if meta.what&(constMsgMetaData|constMsgMetaDel|constMsgMetaTags) != 0 {
-		log.Println("s.get: subscribe first to get=", msg.Get.What)
-		s.queueOut(ErrPermissionDenied(msg.id, msg.topic, msg.timestamp))
-	} else {
+	} else if meta.pkt.MetaWhat&(constMsgMetaDesc|constMsgMetaSub) != 0 {
 		// Request some minimal info from a topic not currently attached to.
 		globals.hub.meta <- meta
+	} else {
+		log.Println("s.get: subscribe first to get=", msg.Get.What)
+		s.queueOut(ErrPermissionDeniedReply(msg, msg.Timestamp))
 	}
 }
 
 func (s *Session) set(msg *ClientComMessage) {
 	// Expand topic name.
-	expanded, resp := s.expandTopicName(msg)
+	var resp *ServerComMessage
+	msg.RcptTo, resp = s.expandTopicName(msg)
 	if resp != nil {
 		s.queueOut(resp)
 		return
 	}
 
 	meta := &metaReq{
-		topic: expanded,
-		pkt:   msg,
-		sess:  s}
+		pkt:  msg,
+		sess: s}
 
 	if msg.Set.Desc != nil {
-		meta.what = constMsgMetaDesc
+		meta.pkt.MetaWhat = constMsgMetaDesc
 	}
 	if msg.Set.Sub != nil {
-		meta.what |= constMsgMetaSub
+		meta.pkt.MetaWhat |= constMsgMetaSub
 	}
 	if msg.Set.Tags != nil {
-		meta.what |= constMsgMetaTags
+		meta.pkt.MetaWhat |= constMsgMetaTags
 	}
 	if msg.Set.Cred != nil {
-		meta.what |= constMsgMetaCred
+		meta.pkt.MetaWhat |= constMsgMetaCred
 	}
 
-	if meta.what == 0 {
-		s.queueOut(ErrMalformed(msg.id, msg.topic, msg.timestamp))
+	if meta.pkt.MetaWhat == 0 {
+		s.queueOut(ErrMalformedReply(msg, msg.Timestamp))
 		log.Println("s.set: nil Set action")
-	} else if sub := s.getSub(expanded); sub != nil {
+	} else if sub := s.getSub(msg.RcptTo); sub != nil {
 		sub.meta <- meta
-	} else if globals.cluster.isRemoteTopic(expanded) {
-		// The topic is handled by a remote node. Forward message to it.
-		if err := globals.cluster.routeToTopic(msg, expanded, s); err != nil {
-			s.queueOut(ErrClusterUnreachable(msg.id, msg.topic, msg.timestamp))
-		}
-	} else if meta.what&constMsgMetaTags != 0 {
-		log.Println("s.set: can Set tags for subscribed topics only")
-		s.queueOut(ErrPermissionDenied(msg.id, msg.topic, msg.timestamp))
+	} else if meta.pkt.MetaWhat&(constMsgMetaTags|constMsgMetaCred) != 0 {
+		log.Println("s.set: can Set tags/creds for subscribed topics only", meta.pkt.MetaWhat)
+		s.queueOut(ErrPermissionDeniedReply(msg, msg.Timestamp))
 	} else {
-		// Some minor updates are possible without the subscription.
+		// Desc.Private and Sub updates are possible without the subscription.
 		globals.hub.meta <- meta
 	}
 }
 
 func (s *Session) del(msg *ClientComMessage) {
-	what := parseMsgClientDel(msg.Del.What)
+	msg.MetaWhat = parseMsgClientDel(msg.Del.What)
 
 	// Delete user
-	if what == constMsgDelUser {
+	if msg.MetaWhat == constMsgDelUser {
 		replyDelUser(s, msg)
 		return
 	}
@@ -905,43 +1038,35 @@ func (s *Session) del(msg *ClientComMessage) {
 	// Delete something other than user: topic, subscription, message(s)
 
 	// Expand topic name and validate request.
-	expanded, resp := s.expandTopicName(msg)
+	var resp *ServerComMessage
+	msg.RcptTo, resp = s.expandTopicName(msg)
 	if resp != nil {
 		s.queueOut(resp)
 		return
 	}
 
-	if what == 0 {
-		s.queueOut(ErrMalformed(msg.id, msg.topic, msg.timestamp))
+	if msg.MetaWhat == 0 {
+		s.queueOut(ErrMalformedReply(msg, msg.Timestamp))
 		log.Println("s.del: invalid Del action", msg.Del.What, s.sid)
 		return
 	}
-
-	sub := s.getSub(expanded)
-	if sub != nil && what != constMsgDelTopic {
+	sub := s.getSub(msg.RcptTo)
+	if sub != nil && msg.MetaWhat != constMsgDelTopic {
 		// Session is attached, deleting subscription or messages. Send to topic.
 		sub.meta <- &metaReq{
-			topic: expanded,
-			pkt:   msg,
-			sess:  s,
-			what:  what}
-
-	} else if sub == nil && globals.cluster.isRemoteTopic(expanded) {
-		// The topic is handled by a remote node. Forward message to it.
-		if err := globals.cluster.routeToTopic(msg, expanded, s); err != nil {
-			s.queueOut(ErrClusterUnreachable(msg.id, msg.topic, msg.timestamp))
-		}
-	} else if what == constMsgDelTopic {
+			pkt:  msg,
+			sess: s}
+	} else if msg.MetaWhat == constMsgDelTopic {
 		// Deleting topic: for sessions attached or not attached, send request to hub first.
 		// Hub will forward to topic, if appropriate.
 		globals.hub.unreg <- &topicUnreg{
-			topic: expanded,
-			pkt:   msg,
-			sess:  s,
-			del:   true}
+			rcptTo: msg.RcptTo,
+			pkt:    msg,
+			sess:   s,
+			del:    true}
 	} else {
 		// Must join the topic to delete messages or subscriptions.
-		s.queueOut(ErrAttachFirst(msg.id, msg.topic, msg.timestamp))
+		s.queueOut(ErrAttachFirst(msg, msg.Timestamp))
 		log.Println("s.del: invalid Del action while unsubbed", msg.Del.What, s.sid)
 	}
 }
@@ -950,13 +1075,14 @@ func (s *Session) del(msg *ClientComMessage) {
 // Not reporting any errors
 func (s *Session) note(msg *ClientComMessage) {
 
-	if s.ver == 0 || msg.from == "" {
+	if s.ver == 0 || msg.AsUser == "" {
 		// Silently ignore the message: have not received {hi} or don't know who sent the message.
 		return
 	}
 
 	// Expand topic name and validate request.
-	expanded, resp := s.expandTopicName(msg)
+	var resp *ServerComMessage
+	msg.RcptTo, resp = s.expandTopicName(msg)
 	if resp != nil {
 		// Silently ignoring the message
 		return
@@ -975,17 +1101,22 @@ func (s *Session) note(msg *ClientComMessage) {
 		return
 	}
 
-	if sub := s.getSub(expanded); sub != nil {
+	if sub := s.getSub(msg.RcptTo); sub != nil {
 		// Pings can be sent to subscribed topics only
-		sub.broadcast <- &ServerComMessage{Info: &MsgServerInfo{
-			Topic: msg.topic,
-			From:  msg.from,
-			What:  msg.Note.What,
-			SeqId: msg.Note.SeqId,
-		}, rcptto: expanded, timestamp: msg.timestamp, skipSid: s.sid}
-	} else if globals.cluster.isRemoteTopic(expanded) {
-		// The topic is handled by a remote node. Forward message to it.
-		globals.cluster.routeToTopic(msg, expanded, s)
+		sub.broadcast <- &ServerComMessage{
+			Info: &MsgServerInfo{
+				Topic: msg.Original,
+				From:  msg.AsUser,
+				What:  msg.Note.What,
+				SeqId: msg.Note.SeqId},
+			RcptTo:    msg.RcptTo,
+			AsUser:    msg.AsUser,
+			Timestamp: msg.Timestamp,
+			SkipSid:   s.sid,
+			sess:      s}
+	} else {
+		s.queueOut(ErrAttachFirst(msg, msg.Timestamp))
+		log.Println("s.note: note to invalid topic - must subscribe first", msg.Note.What, s.sid)
 	}
 }
 
@@ -996,42 +1127,66 @@ func (s *Session) note(msg *ClientComMessage) {
 //   err: *ServerComMessage with an error to return to the sender
 func (s *Session) expandTopicName(msg *ClientComMessage) (string, *ServerComMessage) {
 
-	if msg.topic == "" {
+	if msg.Original == "" {
 		log.Println("s.etn: empty topic name", s.sid)
-		return "", ErrMalformed(msg.id, "", msg.timestamp)
+		return "", ErrMalformed(msg.Id, "", msg.Timestamp)
 	}
 
 	// Expanded name of the topic to route to i.e. rcptto: or s.subs[routeTo]
 	var routeTo string
-	if msg.topic == "me" {
-		routeTo = msg.from
-	} else if msg.topic == "fnd" {
-		routeTo = types.ParseUserId(msg.from).FndName()
-	} else if strings.HasPrefix(msg.topic, "usr") {
+	if msg.Original == "me" {
+		routeTo = msg.AsUser
+	} else if msg.Original == "fnd" {
+		routeTo = types.ParseUserId(msg.AsUser).FndName()
+	} else if strings.HasPrefix(msg.Original, "usr") {
 		// p2p topic
-		uid1 := types.ParseUserId(msg.from)
-		uid2 := types.ParseUserId(msg.topic)
+		uid1 := types.ParseUserId(msg.AsUser)
+		uid2 := types.ParseUserId(msg.Original)
 		if uid2.IsZero() {
-			// Ensure the user id is valid
+			// Ensure the user id is valid.
 			log.Println("s.etn: failed to parse p2p topic name", s.sid)
-			return "", ErrMalformed(msg.id, msg.topic, msg.timestamp)
+			return "", ErrMalformed(msg.Id, msg.Original, msg.Timestamp)
 		} else if uid2 == uid1 {
-			// Use 'me' to access self-topic
+			// Use 'me' to access self-topic.
 			log.Println("s.etn: invalid p2p self-subscription", s.sid)
-			return "", ErrPermissionDenied(msg.id, msg.topic, msg.timestamp)
+			return "", ErrPermissionDeniedReply(msg, msg.Timestamp)
 		}
 		routeTo = uid1.P2PName(uid2)
+	} else if tmp := types.ChnToGrp(msg.Original); tmp != "" {
+		routeTo = tmp
 	} else {
-		routeTo = msg.topic
+		routeTo = msg.Original
 	}
 
 	return routeTo, nil
 }
 
-func (s *Session) serialize(msg *ServerComMessage) interface{} {
+func (s *Session) serialize(msg *ServerComMessage) (int, interface{}) {
 	if s.proto == GRPC {
-		return pbServSerialize(msg)
+		msg := pbServSerialize(msg)
+		// TODO: calculate and return the size of `msg`.
+		return -1, msg
 	}
+
+	if s.proto == MULTIPLEX {
+		// No need to serialize the message to bytes within the cluster,
+		// but we have to create a copy because the original msg can be mutated.
+		return -1, msg.copy()
+	}
+
 	out, _ := json.Marshal(msg)
-	return out
+	return len(out), out
+}
+
+// onBackgroundTimer marks background session as foreground and informs topics it's subscribed to.
+func (s *Session) onBackgroundTimer() {
+	s.subsLock.RLock()
+	defer s.subsLock.RUnlock()
+
+	update := &sessionUpdate{sess: s}
+	for _, sub := range s.subs {
+		if sub.supd != nil {
+			sub.supd <- update
+		}
+	}
 }

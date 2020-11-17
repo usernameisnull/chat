@@ -36,7 +36,7 @@ Request and response payloads are formatted as JSON. Some of the request or resp
 		- [`upd` Update authentication record.](#upd-update-authentication-record)
 			- [Sample request](#sample-request)
 			- [Sample response](#sample-response)
-		- [`rtagns` Get a list of restricted tag namespaces.](#get-a-list-of-restricted-tag-namespaces)
+		- [`rtagns` Get a list of restricted tag namespaces.](#rtagns-get-a-list-of-restricted-tag-namespaces)
 			- [Sample request](#sample-request)
 			- [Sample response](#sample-response)
 
@@ -44,16 +44,33 @@ Request and response payloads are formatted as JSON. Some of the request or resp
 
 ## Configuration
 
+Add the following section to the `auth_config` in [tinode.conf](../../tinode.conf):
+
 ```js
-{
-  // ServerUrl is the URL of the authentication server to call.
-  "server_url": "http://127.0.0.1:5000/",
-  // Server may create new accounts.
-  "allow_new_accounts": true,
-  // Use separate endpoints, i.e. add request name to serverUrl path when making requests:
-  // http://127.0.0.1:5000/add
-  "use_separae_endpoints": true
-}
+...
+"auth_config": {
+  ...
+  "rest": {
+    // ServerUrl is the URL of the authentication server to call.
+    "server_url": "http://127.0.0.1:5000/",
+    // Authentication server is allowed to create new accounts.
+    "allow_new_accounts": true,
+    // Use separate endpoints, i.e. add request name to serverUrl path when making requests:
+    // http://127.0.0.1:5000/add
+    "use_separate_endpoints": true
+  },
+  ...
+},
+```
+If you want to use your authenticator **instead** of stock `basic` (login-password) authentication, add a logical renaming:
+```js
+...
+"auth_config": {
+  "logical_names": ["basic:rest"],
+  "rest": { ... },
+  ...
+},
+...
 ```
 
 ## Request
@@ -68,8 +85,9 @@ Request and response payloads are formatted as JSON. Some of the request or resp
       "authlvl": "auth",    // authentication level
       "lifetime": "10000s", // lifetime of this record
                             // see https://golang.org/pkg/time/#Duration for format.
-    	"features": 2,        // bitmap of features
-    	"tags": ["email:alice@example.com"] // Tags associated with this authentication record.
+       "features": 2,       // bitmap of features
+       "tags": ["email:alice@example.com"], // Tags associated with this authentication record.
+       "state": "ok",       // optional account state.
     }
   }
 }
@@ -169,7 +187,8 @@ The server may optionally return a challenge as `byteval`.
 {
   "rec": {
     "uid": "LELEQHDWbgY",
-    "authlvl": "auth"
+    "authlvl": "auth",
+    "state": "ok"
   },
   "byteval": "9X6m3tWeBEMlDxlcFAABAAEAbVs"
 }
@@ -185,6 +204,7 @@ The server may optionally return a challenge as `byteval`.
     "tags": ["email:alice@example.com", "uname:alice"]
   },
   "newacc": {
+    "state": "suspended",
     "auth": "JRWPS",
     "anon": "N",
     "public": {/* see /docs/API.md#public-and-private-fields */},
@@ -258,7 +278,7 @@ If accounts are managed by the server, the server should respond with an error `
 
 ### `link` Requests server to link new account ID to authentication record.
 
-If server requested Tinode to create a new account, this endpoint is used to link the new Tinode user ID with the server's authentication record. If linking was successful, the server should respond with a non-empty json.
+If server requested Tinode to create a new account, this endpoint is used to link the new Tinode user ID with the server's authentication record. If linking is successful, the server should respond with a non-empty json.
 
 #### Sample request
 ```json
@@ -301,7 +321,10 @@ If accounts are managed by the server, the server should respond with an error `
 
 ### `rtagns` Get a list of restricted tag namespaces.
 
-Server may enforce certain tag namespaces to be restricted, i.e. not editable by the user.
+Server may enforce certain tag namespaces (tag prefixes) to be restricted, i.e. not editable by the user.
+These are also used in Tinode discovery mechanism (e.g. searching for users, contact sync). See [API docs](/docs/API.md#fnd-and-tags-finding-users-and-topics) for details.
+
+The server may optionally provide a regular expression to validate search tokens before rewriting them as prefixed tags. I.e. if server allows only logins of 3-8 ASCII letters and numbers then the regexp could be `^[a-z0-9_]{3,8}$` which is base64-encoded as `XlthLXowLTlfXXszLDh9JA==`.
 
 #### Sample request
 ```json
@@ -313,6 +336,7 @@ Server may enforce certain tag namespaces to be restricted, i.e. not editable by
 #### Sample response
 ```json
 {
-	"strarr": ["basic", "email", "tel"]
+  "strarr": ["basic", "email", "tel"],
+  "byteval": "XlthLXowLTlfXXszLDh9JA=="
 }
 ```

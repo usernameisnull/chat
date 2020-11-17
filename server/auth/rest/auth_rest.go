@@ -1,14 +1,15 @@
+// Package rest provides authentication by calling a separate process over REST API (technically JSON RPC, not REST).
 package rest
-
-// Authentication by calling a separate process over REST API.
 
 import (
 	"bytes"
 	"encoding/json"
 	"errors"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -27,6 +28,10 @@ type authenticator struct {
 	allowNewAccounts bool
 	// Use separate endpoints, i.e. add request name to serverUrl path when making requests.
 	useSeparateEndpoints bool
+	// Cache of restricted tag prefixes (namespaces).
+	rTagNS []string
+	// Optional regex pattern for checking tokens.
+	reToken *regexp.Regexp
 }
 
 // Request to the server.
@@ -67,7 +72,7 @@ type response struct {
 }
 
 // Init initializes the handler.
-func (a *authenticator) Init(jsonconf, name string) error {
+func (a *authenticator) Init(jsonconf json.RawMessage, name string) error {
 	if a.name != "" {
 		return errors.New("auth_rest: already initialized as " + a.name + "; " + name)
 	}
@@ -82,9 +87,9 @@ func (a *authenticator) Init(jsonconf, name string) error {
 	}
 
 	var config configType
-	err := json.Unmarshal([]byte(jsonconf), &config)
+	err := json.Unmarshal(jsonconf, &config)
 	if err != nil {
-		return errors.New("auth_rest: failed to parse config: " + err.Error() + "(" + jsonconf + ")")
+		return errors.New("auth_rest: failed to parse config: " + err.Error() + "(" + string(jsonconf) + ")")
 	}
 
 	serverUrl, err := url.Parse(config.ServerUrl)
@@ -110,7 +115,7 @@ func (a *authenticator) callEndpoint(endpoint string, rec *auth.Rec, secret []by
 	req := &request{Endpoint: endpoint, Name: a.name, Record: rec, Secret: secret}
 	content, err := json.Marshal(req)
 	if err != nil {
-		return nil, types.ErrMalformed
+		return nil, err
 	}
 
 	urlToCall := a.serverUrl
@@ -123,28 +128,28 @@ func (a *authenticator) callEndpoint(endpoint string, rec *auth.Rec, secret []by
 	// Send payload to server using default HTTP client.
 	post, err := http.Post(urlToCall, "application/json", bytes.NewBuffer(content))
 	if err != nil {
-		return nil, types.ErrInternal
+		return nil, err
 	}
 	defer post.Body.Close()
 
 	// Read response.
 	body, err := ioutil.ReadAll(post.Body)
 	if err != nil {
-		return nil, types.ErrInternal
+		return nil, err
 	}
 
 	// Parse response.
 	var resp response
 	err = json.Unmarshal(body, &resp)
 	if err != nil {
-		return nil, types.ErrInternal
+		return nil, err
 	}
 
 	if resp.Err != "" {
 		return nil, types.StoreError(resp.Err)
 	}
 
-	return &resp, err
+	return &resp, nil
 }
 
 // AddRecord adds persistent authentication record to the database.
@@ -180,6 +185,7 @@ func (a *authenticator) Authenticate(secret []byte) (*auth.Rec, []byte, error) {
 		// Create account, get UID, report UID back to the server.
 
 		user := types.User{
+			State:  resp.Record.State,
 			Public: resp.NewAcc.Public,
 			Tags:   resp.Record.Tags,
 		}
@@ -200,6 +206,19 @@ func (a *authenticator) Authenticate(secret []byte) (*auth.Rec, []byte, error) {
 	}
 
 	return resp.Record, resp.ByteVal, nil
+}
+
+// AsTag converts search token into prefixed tag or an empty string if it
+// cannot be represented as a prefixed tag.
+func (a *authenticator) AsTag(token string) string {
+	if len(a.rTagNS) > 0 {
+		if a.reToken != nil && !a.reToken.MatchString(token) {
+			return ""
+		}
+		// No validation or passed validation.
+		return a.rTagNS[0] + ":" + token
+	}
+	return ""
 }
 
 // IsUnique verifies if the provided secret can be considered unique by the auth scheme
@@ -229,14 +248,38 @@ func (a *authenticator) DelRecords(uid types.Uid) error {
 	return err
 }
 
-// RestrictedTags returns tag namespaces restricted by the server.
+// RestrictedTags returns tag namespaces (prefixes, such as prefix:login) restricted by the server.
 func (a *authenticator) RestrictedTags() ([]string, error) {
+	if a.rTagNS != nil {
+		// Using cached prefixes.
+		ns := make([]string, len(a.rTagNS))
+		// Returning a copy to prevent accidental modification of server-provided tags.
+		copy(ns, a.rTagNS)
+		return ns, nil
+	}
+
+	// First time use, fetch prefixes from the server.
 	resp, err := a.callEndpoint("rtagns", nil, nil)
 	if err != nil {
 		return nil, err
 	}
 
+	// Save valid result to cache.
+	a.rTagNS = resp.StrSliceVal
+	if len(resp.ByteVal) > 0 {
+		a.reToken, err = regexp.Compile(string(resp.ByteVal))
+		if err != nil {
+			log.Println("rest_auth: invalid token regexp", string(resp.ByteVal))
+		}
+	}
 	return resp.StrSliceVal, nil
+}
+
+// GetResetParams returns authenticator parameters passed to password reset handler
+// (none for rest).
+func (authenticator) GetResetParams(uid types.Uid) (map[string]interface{}, error) {
+	// TODO: route request to the server.
+	return nil, nil
 }
 
 func init() {

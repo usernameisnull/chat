@@ -13,13 +13,13 @@ import (
 	"crypto/tls"
 	"io"
 	"log"
-	"net"
 	"time"
 
 	"github.com/tinode/chat/pbx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/peer"
 )
 
 type grpcNodeServer struct {
@@ -35,7 +35,11 @@ func (sess *Session) closeGrpc() {
 
 // Equivalent of starting a new session and a read loop in one
 func (*grpcNodeServer) MessageLoop(stream pbx.Node_MessageLoopServer) error {
-	sess, _ := globals.sessionStore.NewSession(stream, "")
+	sess, count := globals.sessionStore.NewSession(stream, "")
+	if p, ok := peer.FromContext(stream.Context()); ok {
+		sess.remoteAddr = p.Addr.String()
+	}
+	log.Println("grpc: session started", sess.sid, sess.remoteAddr, count)
 
 	defer func() {
 		sess.closeGrpc()
@@ -54,6 +58,7 @@ func (*grpcNodeServer) MessageLoop(stream pbx.Node_MessageLoopServer) error {
 			return err
 		}
 		log.Println("grpc in:", truncateStringIfTooLong(in.String()), sess.sid)
+		statsInc("IncomingMessagesGrpcTotal", 1)
 		sess.dispatch(pbCliDeserialize(in))
 
 		sess.lock.Lock()
@@ -84,10 +89,18 @@ func (sess *Session) writeGrpcLoop() {
 				log.Println("grpc: outbound queue limit exceeded", sess.sid)
 				return
 			}
+			statsInc("OutgoingMessagesGrpcTotal", 1)
 			if err := grpcWrite(sess, msg); err != nil {
 				log.Println("grpc: write", sess.sid, err)
 				return
 			}
+
+		case <-sess.bkgTimer.C:
+			if sess.background {
+				sess.background = false
+				sess.onBackgroundTimer()
+			}
+
 		case msg := <-sess.stop:
 			// Shutdown requested, don't care if the message is delivered
 			if msg != nil {
@@ -115,7 +128,7 @@ func serveGrpc(addr string, kaEnabled bool, tlsConf *tls.Config) (*grpc.Server, 
 		return nil, nil
 	}
 
-	lis, err := net.Listen("tcp", addr)
+	lis, err := netListener(addr)
 	if err != nil {
 		return nil, err
 	}

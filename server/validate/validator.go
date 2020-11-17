@@ -12,7 +12,8 @@ type Validator interface {
 
 	// PreCheck pre-validates the credential without sending an actual request for validation:
 	// check uniqueness (if appropriate), format, etc
-	PreCheck(cred string, params interface{}) error
+	// Returns normalized credential prefixed with an appropriate namespace prefix.
+	PreCheck(cred string, params map[string]interface{}) (string, error)
 
 	// Request sends a request for confirmation to the user. Returns true if it's a new credential,
 	// false if it re-sent request for an existing unconfirmed credential.
@@ -28,7 +29,8 @@ type Validator interface {
 	//   scheme: authentication scheme being reset.
 	//   lang: human language as reported in the session.
 	//   tmpToken: temporary authentication token
-	ResetSecret(cred, scheme, lang string, tmpToken []byte) error
+	//   params: authentication params.
+	ResetSecret(cred, scheme, lang string, tmpToken []byte, params map[string]interface{}) error
 
 	// Check checks validity of user's response.
 	// Returns the value of validated credential on success.
