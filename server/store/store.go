@@ -4,6 +4,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -216,6 +217,7 @@ var Users UsersObjMapper
 func (UsersObjMapper) Create(user *types.User, private interface{}) (*types.User, error) {
 
 	user.SetUid(GetUid())
+	log.Printf("mabing: (UsersObjMapper) Create(...), user.Public = %+v,user.Uid() = %+v",user.Public,user.Uid())
 	user.InitTimes()
 
 	err := adp.UserCreate(user)

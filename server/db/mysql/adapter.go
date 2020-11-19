@@ -7,16 +7,16 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"hash/fnv"
-	"strconv"
-	"strings"
-	"time"
-
 	ms "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 	"github.com/tinode/chat/server/auth"
 	"github.com/tinode/chat/server/store"
 	t "github.com/tinode/chat/server/store/types"
+	"hash/fnv"
+	"log"
+	"strconv"
+	"strings"
+	"time"
 )
 
 // adapter holds MySQL connection data.
@@ -667,6 +667,7 @@ func (a *adapter) UserCreate(user *t.User) error {
 	}()
 
 	decoded_uid := store.DecodeUid(user.Uid())
+	log.Printf("mabing: (a *adapter) UserCreate, user.Uid() = %+v, user.Public = %+v, decoded_uid = %+v",user.Uid(),user.Public,decoded_uid)
 	if _, err = tx.Exec("INSERT INTO users(id,createdat,updatedat,state,access,public,tags) VALUES(?,?,?,?,?,?,?)",
 		decoded_uid,
 		user.CreatedAt, user.UpdatedAt,

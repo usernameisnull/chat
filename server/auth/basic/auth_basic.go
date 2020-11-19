@@ -4,6 +4,7 @@ package basic
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -124,6 +125,7 @@ func (a *authenticator) AddRecord(rec *auth.Rec, secret []byte) (*auth.Rec, erro
 	if err != nil {
 		return nil, err
 	}
+	log.Printf("mabing: (a *authenticator) AddRecord(...), 处理后的登陆密码: passhash = %s",string(passhash))
 	var expires time.Time
 	if rec.Lifetime > 0 {
 		expires = time.Now().Add(rec.Lifetime).UTC().Round(time.Millisecond)

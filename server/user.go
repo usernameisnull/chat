@@ -122,7 +122,7 @@ func replyCreateUser(s *Session, msg *ClientComMessage, rec *auth.Rec) {
 		s.queueOut(ErrUnknown(msg.Id, "", msg.Timestamp))
 		return
 	}
-
+	log.Printf("mabing: replyCreateUser(...), msg.Acc.Secret = %s", string(msg.Acc.Secret)) // mabing:123456
 	// Add authentication record. The authhdl.AddRecord may change tags.
 	rec, err := authhdl.AddRecord(&auth.Rec{Uid: user.Uid(), Tags: user.Tags}, msg.Acc.Secret)
 	if err != nil {
