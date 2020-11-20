@@ -504,11 +504,9 @@ func (t *Topic) handleSubscription(h *Hub, join *sessionJoin) error {
 	if msgsub.Get != nil {
 		getWhat = parseMsgClientMeta(msgsub.Get.What)
 	}
-
-	if err := t.subscriptionReply(h, asChan, join); err != nil {
+	if err := t.subscriptionReply(h, asChan, join); err != nil { // {"ctrl":{"id":"73974","topic":"grpFym1fiGOl7g","code":200,"text":"ok","ts":"2020-11-20T07:20:27.412Z"}}
 		return err
 	}
-
 	if getWhat&constMsgMetaDesc != 0 {
 		// Send get.desc as a {meta} packet.
 		if err := t.replyGetDesc(join.sess, asUid, msgsub.Get.Desc, join.pkt); err != nil {
@@ -1988,6 +1986,7 @@ func (t *Topic) replySetDesc(sess *Session, asUid types.Uid, msg *ClientComMessa
 // replyGetSub is a response to a get.sub request on a topic - load a list of subscriptions/subscribers,
 // send it just to the session as a {meta} packet
 func (t *Topic) replyGetSub(sess *Session, asUid types.Uid, authLevel auth.Level, msg *ClientComMessage) error {
+	log.Printf("mabing: (t *Topic) replyGetSub(...), t = %+v, asUid = %+v, authLevel = %+v, msg = %+v",t.cat,asUid,authLevel,msg)
 	now := types.TimeNow()
 	id := msg.Id
 	incomingReqTs := msg.Timestamp
@@ -2022,7 +2021,7 @@ func (t *Topic) replyGetSub(sess *Session, asUid types.Uid, authLevel auth.Level
 
 	var subs []types.Subscription
 	var err error
-
+	log.Printf("mabing: (t *Topic) replyGetSub(...), ifModified = %+v",ifModified)
 	switch t.cat {
 	case types.TopicCatMe:
 		if req != nil {
@@ -2115,7 +2114,7 @@ func (t *Topic) replyGetSub(sess *Session, asUid types.Uid, authLevel auth.Level
 		meta := &MsgServerMeta{Id: id, Topic: t.original(asUid), Timestamp: &now}
 		meta.Sub = make([]MsgTopicSub, 0, len(subs))
 		presencer := (userData.modeGiven & userData.modeWant).IsPresencer()
-
+		log.Printf("mabing: (t *Topic) replyGetSub(...), subs = %+v",subs)
 		for i := range subs {
 			sub := &subs[i]
 			// Indicator if the requester has provided a cut off date for ts of pub & priv updates.

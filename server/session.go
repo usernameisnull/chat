@@ -519,6 +519,7 @@ func (s *Session) dispatch(msg *ClientComMessage) {
 
 // Request to subscribe to a topic.
 func (s *Session) subscribe(msg *ClientComMessage) {
+	log.Printf("mabing: (s *Session) subscribe(...), msg = %+v",msg)
 	if strings.HasPrefix(msg.Original, "new") || strings.HasPrefix(msg.Original, "nch") {
 		// Request to create a new group/channel topic.
 		// If we are in a cluster, make sure the new topic belongs to the current node.
@@ -526,6 +527,7 @@ func (s *Session) subscribe(msg *ClientComMessage) {
 	} else {
 		var resp *ServerComMessage
 		msg.RcptTo, resp = s.expandTopicName(msg)
+		log.Printf("mabing: (s *Session) subscribe(...), resp = %+v,msg.RcpTo = %+v",resp,msg.RcptTo)
 		if resp != nil {
 			s.queueOut(resp)
 			return
@@ -534,13 +536,13 @@ func (s *Session) subscribe(msg *ClientComMessage) {
 
 	// Session can subscribe to topic on behalf of a single user at a time.
 	if sub := s.getSub(msg.RcptTo); sub != nil {
+		log.Println("mabing: (s *Session) subscribe(...), sub!=nil")
 		s.queueOut(InfoAlreadySubscribed(msg.Id, msg.Original, msg.Timestamp))
 	} else {
+		log.Println("mabing: (s *Session) subscribe(...), sub == nil")
 		s.inflightReqs.Add(1)
 		select {
-		case globals.hub.join <- &sessionJoin{
-			pkt:  msg,
-			sess: s}:
+		case globals.hub.join <- &sessionJoin{pkt:  msg, sess: s}:
 		default:
 			// Reply with a 500 to the user.
 			s.queueOut(ErrUnknownReply(msg, msg.Timestamp))

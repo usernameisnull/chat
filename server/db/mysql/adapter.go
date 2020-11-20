@@ -1255,6 +1255,7 @@ func (a *adapter) TopicGet(topic string) (*t.Topic, error) {
 // TopicsForUser loads user's contact list: p2p and grp topics, except for 'me' & 'fnd' subscriptions.
 // Reads and denormalizes Public value.
 func (a *adapter) TopicsForUser(uid t.Uid, keepDeleted bool, opts *t.QueryOpt) ([]t.Subscription, error) {
+	log.Printf("mabing: (a *adapter) TopicsForUser(...), uid = %+v, keepDeleted = %+v, opts = %+v", uid,keepDeleted,opts)
 	// Fetch user's subscriptions
 	q := `SELECT createdat,updatedat,deletedat,topic,delid,recvseqid,
 		readseqid,modewant,modegiven,private FROM subscriptions WHERE userid=?`
@@ -1280,7 +1281,7 @@ func (a *adapter) TopicsForUser(uid t.Uid, keepDeleted bool, opts *t.QueryOpt) (
 
 	q += " LIMIT ?"
 	args = append(args, limit)
-
+	log.Printf("mabing: (a *adapter) TopicsForUser(...),args = %+v", args)
 	rows, err := a.db.Queryx(q, args...)
 	if err != nil {
 		return nil, err
@@ -1337,6 +1338,7 @@ func (a *adapter) TopicsForUser(uid t.Uid, keepDeleted bool, opts *t.QueryOpt) (
 
 	if len(topq) > 0 {
 		// Fetch grp & p2p topics
+		log.Printf("mabing: (a *adapter) TopicsForUser(...), topq = %+v", topq)
 		q, topq, _ := sqlx.In(
 			"SELECT createdat,updatedat,state,stateat,touchedat,name AS id,usebt,access,seqid,delid,public,tags "+
 				"FROM topics WHERE name IN (?)", topq)
