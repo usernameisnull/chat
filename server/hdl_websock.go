@@ -84,7 +84,7 @@ func (sess *Session) writeLoop() {
 				return
 			}
 			statsInc("OutgoingMessagesWebsockTotal", 1)
-			if err := wsWrite(sess.ws, websocket.TextMessage, msg); err != nil {
+			if err := wsWrite(sess, websocket.TextMessage, msg); err != nil {
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure,
 					websocket.CloseNormalClosure) {
 					log.Println("ws: writeLoop", sess.sid, err)
@@ -101,7 +101,7 @@ func (sess *Session) writeLoop() {
 		case msg := <-sess.stop:
 			// Shutdown requested, don't care if the message is delivered
 			if msg != nil {
-				wsWrite(sess.ws, websocket.TextMessage, msg)
+				wsWrite(sess, websocket.TextMessage, msg)
 			}
 			return
 
@@ -109,7 +109,7 @@ func (sess *Session) writeLoop() {
 			sess.delSub(topic)
 
 		case <-ticker.C:
-			if err := wsWrite(sess.ws, websocket.PingMessage, nil); err != nil {
+			if err := wsWrite(sess, websocket.PingMessage, nil); err != nil {
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure,
 					websocket.CloseNormalClosure) {
 					log.Println("ws: writeLoop ping", sess.sid, err)
@@ -121,16 +121,17 @@ func (sess *Session) writeLoop() {
 }
 
 // Writes a message with the given message type (mt) and payload.
-func wsWrite(ws *websocket.Conn, mt int, msg interface{}) error {
+//func wsWrite(ws *websocket.Conn, mt int, msg interface{}) error {
+func wsWrite(s *Session, mt int, msg interface{}) error {
 	var bits []byte
 	if msg != nil {
 		bits = msg.([]byte)
 	} else {
 		bits = []byte{}
 	}
-	ws.SetWriteDeadline(time.Now().Add(writeWait))
-	log.Printf("out: mt = %v, %s", mt,string(bits))
-	return ws.WriteMessage(mt, bits)
+	s.ws.SetWriteDeadline(time.Now().Add(writeWait))
+	log.Printf("out: mt = %v, %s, uid=%+v", mt,string(bits), s.uid)
+	return s.ws.WriteMessage(mt, bits)
 }
 
 // Handles websocket requests from peers

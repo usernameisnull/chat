@@ -1330,7 +1330,7 @@ func (a *adapter) TopicsForUser(uid t.Uid, keepDeleted bool, opts *t.QueryOpt) (
 	if err != nil {
 		return nil, err
 	}
-
+	log.Printf("mabing: (a *adapter) TopicsForUser(...),topq = %+v, usrq = %+v", topq,usrq)
 	var subs []t.Subscription
 	if len(topq) > 0 || len(usrq) > 0 {
 		subs = make([]t.Subscription, 0, len(join))
@@ -1338,7 +1338,6 @@ func (a *adapter) TopicsForUser(uid t.Uid, keepDeleted bool, opts *t.QueryOpt) (
 
 	if len(topq) > 0 {
 		// Fetch grp & p2p topics
-		log.Printf("mabing: (a *adapter) TopicsForUser(...), topq = %+v", topq)
 		q, topq, _ := sqlx.In(
 			"SELECT createdat,updatedat,state,stateat,touchedat,name AS id,usebt,access,seqid,delid,public,tags "+
 				"FROM topics WHERE name IN (?)", topq)

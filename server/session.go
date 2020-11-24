@@ -1092,6 +1092,7 @@ func (s *Session) note(msg *ClientComMessage) {
 
 	switch msg.Note.What {
 	case "kp":
+		log.Printf("mabing: (s *Session) note(...), msg = %+v",msg)
 		if msg.Note.SeqId != 0 {
 			return
 		}
