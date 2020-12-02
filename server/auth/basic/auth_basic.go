@@ -214,8 +214,8 @@ func (a *authenticator) Authenticate(secret []byte) (*auth.Rec, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-
 	uid, authLvl, passhash, expires, err := store.Users.GetAuthUniqueRecord(a.name, uname)
+	log.Printf("mabing: (a *authenticator) Authenticate(...), a.name = %v, uname = %v, uid = %v",a.name,uname, uid)
 	if err != nil {
 		return nil, nil, err
 	}

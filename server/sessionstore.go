@@ -38,13 +38,12 @@ type SessionStore struct {
 // NewSession creates a new session and saves it to the session store.
 func (ss *SessionStore) NewSession(conn interface{}, sid string) (*Session, int) {
 	var s Session
-
 	if sid == "" {
 		s.sid = store.GetUidString()
 	} else {
 		s.sid = sid
 	}
-
+	log.Printf("mabing:  (ss *SessionStore) NewSession(...), sid = %s, s.sid = %s", sid, s.sid)
 	ss.lock.Lock()
 	if _, found := ss.sessCache[s.sid]; found {
 		log.Fatalln("ERROR! duplicate session ID", s.sid)

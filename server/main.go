@@ -253,12 +253,11 @@ type configType struct {
 }
 
 func main() {
-	executable, _ := os.Executable()
+	executable, _ := os.Executable() // D:\gomod\chat\server\tinode.exe
 
 	// All relative paths are resolved against the executable path, not against current working directory.
 	// Absolute paths are left unchanged.
-	rootpath, _ := filepath.Split(executable)
-
+	rootpath, _ := filepath.Split(executable)  // D:\gomod\chat\server\
 	log.Printf("Server v%s:%s:%s; pid %d; %d process(es)",
 		currentVersion, executable, buildstamp,
 		os.Getpid(), runtime.GOMAXPROCS(runtime.NumCPU()))

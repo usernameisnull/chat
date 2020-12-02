@@ -802,7 +802,7 @@ func (s *Session) login(msg *ClientComMessage) {
 		s.queueOut(ErrAlreadyAuthenticated(msg.Id, "", msg.Timestamp))
 		return
 	}
-
+	log.Printf("mabing: (s *Session) login(...), msg.Login.Secret = %s", msg.Login.Secret)
 	handler := store.GetLogicalAuthHandler(msg.Login.Scheme)
 	if handler == nil {
 		log.Println("s.login: unknown authentication scheme", msg.Login.Scheme, s.sid)
